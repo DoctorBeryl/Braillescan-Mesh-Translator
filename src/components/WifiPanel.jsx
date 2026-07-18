@@ -6,6 +6,7 @@ const API_BASE = '/api/wifi'
 function WifiPanel({ open, onClose, theme, themePalette, tone }) {
   const [ifaceChecked, setIfaceChecked] = useState(false)
   const [ifaceExists, setIfaceExists] = useState(false)
+  const [ifaceError, setIfaceError] = useState('')
   const [networks, setNetworks] = useState([])
   const [scanning, setScanning] = useState(false)
   const [scanError, setScanError] = useState('')
@@ -34,22 +35,27 @@ function WifiPanel({ open, onClose, theme, themePalette, tone }) {
     if (!open) return
 
     setIfaceChecked(false)
+    setIfaceError('')
     setSelected(null)
     setConnectResult(null)
 
     let cancelled = false
 
     fetch(`${API_BASE}/interface`)
-      .then((response) => response.json())
+      .then((response) => {
+        if (!response.ok) throw new Error(`Backend responded with ${response.status}.`)
+        return response.json()
+      })
       .then((data) => {
         if (cancelled) return
         setIfaceExists(Boolean(data.exists))
         setIfaceChecked(true)
         if (data.exists) scanNetworks()
       })
-      .catch(() => {
+      .catch((err) => {
         if (cancelled) return
         setIfaceExists(false)
+        setIfaceError(err.message || 'Could not reach the Wi-Fi backend.')
         setIfaceChecked(true)
       })
 
@@ -120,7 +126,11 @@ function WifiPanel({ open, onClose, theme, themePalette, tone }) {
             <p className={`text-sm ${themePalette.secondary}`}>Checking for a Wi-Fi adapter…</p>
           )}
 
-          {ifaceChecked && !ifaceExists && (
+          {ifaceChecked && !ifaceExists && ifaceError && (
+            <p className="text-sm text-red-400">Couldn't reach the Wi-Fi backend: {ifaceError}</p>
+          )}
+
+          {ifaceChecked && !ifaceExists && !ifaceError && (
             <p className={`text-sm ${themePalette.secondary}`}>
               No secondary Wi-Fi adapter (wlan1) was detected on this device.
             </p>

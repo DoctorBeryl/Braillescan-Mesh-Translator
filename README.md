@@ -8,10 +8,10 @@
 
 | Document | Descriere | Link |
 |----------|-----------|------|
-| **COMENZI SETUP** | Toate comenzile necesare | [SETUP_COMMANDS.txt](./SETUP_COMMANDS.txt) |
-| **Instalare Rapid** | Setup complet pas cu pas | [SETUP_COMMANDS.txt](./SETUP_COMMANDS.txt) |
-| **Hardware Necesar** | Componente și cerințe | [Vezi mai jos](#cerințe-hardware) |
-| **Modele 3D** | Fișiere STL pentru tipărire | [3dmodels/](./3dmodels/) |
+| **DOCUMENTATIE** | [Documentatie](#descrierea-problemei-pe-care-o-rezolvăm) |
+| **COMENZI SETUP** | [SETUP_COMMANDS.txt](./SETUP_COMMANDS.txt) |
+| **Hardware Necesar** | [Vezi mai jos](#cerințe-hardware) |
+| **Modele 3D** | [3dmodels/](./3dmodels/) |
 
 ---
 

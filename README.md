@@ -10,7 +10,7 @@
 |----------|------|
 | **DOCUMENTATIE** | [Documentatie](#descrierea-problemei-pe-care-o-rezolvăm) |
 | **COMENZI SETUP** | [SETUP_COMMANDS.txt](./SETUP_COMMANDS.txt) |
-| **Hardware Necesar** | [Vezi mai jos](#cerințe-hardware) |
+| **Hardware Necesar** | [Hardware](#cerințe-hardware) |
 | **Modele 3D** | [3dmodels/](./3dmodels/) |
 
 ---

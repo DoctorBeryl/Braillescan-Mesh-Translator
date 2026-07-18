@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Aperture, Box, Bug, ExternalLink, Home as HomeIcon, Languages as LanguagesIcon, Moon, Palette, Settings, Sun, Type, Video, Wifi, X } from 'lucide-react'
 import WifiPanel from './components/WifiPanel'
+import CameraStream from './components/CameraStream'
 
 const tabs = [
   { name: 'Home' },
@@ -38,7 +39,6 @@ const debugEntries = Array.from({ length: 18 }, (_, index) => ({
 
 function App() {
   const [activeTab, setActiveTab] = useState('Home')
-  const [isScanning, setIsScanning] = useState(false)
   const [selectedLanguage, setSelectedLanguage] = useState('English')
   const [showTranslation, setShowTranslation] = useState(true)
   const [compileProgress, setCompileProgress] = useState(42)
@@ -169,37 +169,7 @@ function App() {
     if (activeTab === 'Livestream') {
       return (
         <div className="grid gap-3 lg:grid-cols-[1.25fr_0.75fr]">
-          <div className={`rounded-2xl border p-3 shadow-[0_0_0_1px_rgba(255,255,255,0.03),0_8px_24px_rgba(0,0,0,0.18)] ${tone.strong} ${themePalette.card}`}>
-            <div className="mb-3 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className={`flex h-9 w-9 items-center justify-center rounded-xl ${tone.button}`}>
-                  <Video className="h-4.5 w-4.5" strokeWidth={2.25} />
-                </div>
-                <div>
-                  <p className={`text-[10px] uppercase ${themePalette.muted}`}>Camera</p>
-                  <h3 className={`font-medium ${themePalette.text}`}>Module 3</h3>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsScanning((value) => !value)}
-                className={`cursor-pointer rounded-full px-2.5 py-1 text-xs font-medium transition ${isScanning ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-400/30' : tone.button}`}
-              >
-                {isScanning ? 'Live' : 'Idle'}
-              </button>
-            </div>
-
-            <div className={`flex aspect-video items-center justify-center rounded-xl border border-dashed ${themePalette.outline}`}>
-              {isScanning ? (
-                <div className="text-center">
-                  <div className={`mx-auto mb-2 h-10 w-10 rounded-full border-4 ${tone.dot} border-t-transparent animate-spin`} />
-                  <p className={`text-sm font-medium ${themePalette.text}`}>Stream ready</p>
-                </div>
-              ) : (
-                <p className={`text-sm ${themePalette.secondary}`}>Scanning off</p>
-              )}
-            </div>
-          </div>
+          <CameraStream tone={tone} themePalette={themePalette} />
 
           <div className={`space-y-2 rounded-2xl border p-3 ${themePalette.card}`}>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>

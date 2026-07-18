@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { Aperture, Box, Bug, ExternalLink, Home as HomeIcon, Languages as LanguagesIcon, Moon, Palette, Settings, Sun, Type, Video, X } from 'lucide-react'
+import { Aperture, Box, Bug, ExternalLink, Home as HomeIcon, Languages as LanguagesIcon, Moon, Palette, Settings, Sun, Type, Video, Wifi, X } from 'lucide-react'
+import WifiPanel from './components/WifiPanel'
 
 const tabs = [
   { name: 'Home' },
@@ -45,6 +46,7 @@ function App() {
   const [theme, setTheme] = useState('dark')
   const [textPercent, setTextPercent] = useState(100)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [wifiOpen, setWifiOpen] = useState(false)
   const settingsRef = useRef(null)
 
   useEffect(() => {
@@ -416,15 +418,25 @@ function App() {
                   Monitor the camera, inspect 3D output, and review diagnostics from one workspace.
                 </p>
               </div>
-              <a
-                href="https://github.com/"
-                target="_blank"
-                rel="noreferrer"
-                className={`inline-flex cursor-pointer items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition ${tone.button}`}
-              >
-                <ExternalLink className="h-3.5 w-3.5" strokeWidth={2.25} />
-                GitHub
-              </a>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setWifiOpen(true)}
+                  className={`inline-flex cursor-pointer items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition ${tone.button}`}
+                >
+                  <Wifi className="h-3.5 w-3.5" strokeWidth={2.25} />
+                  Wi-Fi
+                </button>
+                <a
+                  href="https://github.com/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`inline-flex cursor-pointer items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition ${tone.button}`}
+                >
+                  <ExternalLink className="h-3.5 w-3.5" strokeWidth={2.25} />
+                  GitHub
+                </a>
+              </div>
             </div>
           </div>
 
@@ -598,6 +610,14 @@ function App() {
 
         <main>{renderTabContent()}</main>
       </div>
+
+      <WifiPanel
+        open={wifiOpen}
+        onClose={() => setWifiOpen(false)}
+        theme={theme}
+        themePalette={themePalette}
+        tone={tone}
+      />
     </div>
   )
 }

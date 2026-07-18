@@ -1,9 +1,6 @@
 ================================================================================
-    BRAILLESCAN MESH TRANSLATOR - COMENZI SETUP ȘI REFERINȚĂ
+    BRAILLESCAN MESH TRANSLATOR - COMENZI SETUP (MINIM)
 ================================================================================
-
-Acest fișier conține toate comenzile necesare pentru configurare și rulare a
-aplicației BrailleScan Mesh Translator pe Raspberry Pi și pe mașina locală.
 
 CUPRINS:
   1. Setup Dezvoltare (Calculator Local)
@@ -12,162 +9,87 @@ CUPRINS:
   4. Instalare Aplicație pe Raspberry Pi
   5. Pornire Aplicație
   6. Setup Serviciu Systemd (Auto-start)
-  7. Testare Hardware și Verificare
-  8. Configurare Rețea
-  9. Comenzi Rezolvare Probleme
-  10. Întreținere și Actualizări
 
 ================================================================================
 1. SETUP DEZVOLTARE (Calculator Local)
 ================================================================================
 
-Clonare repository:
+Clonare și setup:
   git clone https://github.com/DoctorBeryl/Braillescan-Mesh-Translator.git
   cd Braillescan-Mesh-Translator
-
-Instalare dependințe:
   npm install
-  npm i concurrently --save-dev
 
-Pornire server de dezvoltare (frontend + backend):
+Pornire:
   npm run dev
 
-Build pentru producție:
+Build producție:
   npm run build
-
-Preview build producție:
-  npm run preview
-
-Rulare linter:
-  npm run lint
-
-Pornire doar server backend:
   npm run server
 
 ================================================================================
 2. INSTALARE RASPBERRY PI OS
 ================================================================================
 
-Pas 1: Descărcați și Flash-ați OS
--------------------------------------
-Pe computer:
-  1. Descărcați Raspberry Pi Imager din https://www.raspberrypi.com/software/
-  2. Lansați Raspberry Pi Imager
-  3. Selectați device: Raspberry Pi (versiunea dumneavoastră)
-  4. Selectați OS: Raspberry Pi OS (64-bit) Bookworm
-  5. Selectați storage: Card microSD
-  6. Apăsați "Next" și configurați:
-     - Hostname: "braillescan"
-     - Enable SSH: ✅
-     - Set username/password
-     - Configure Wi-Fi (opțional)
-  7. Scrieți imaginea
-
-Pas 2: Conectare și Boot
-------------------------
-Pe Raspberry Pi:
-  1. Introduceți card microSD flash-at
-  2. Conectați camera, display, senzori
-  3. Conectați alimentare
-  4. Așteptați 2-3 minute pentru boot
-  5. Conectare SSH: ssh pi@braillescan.local
-
-Dacă SSH nu funcționează, aflați IP-ul:
-  sudo arp-scan --localnet
+1. Descărcați Raspberry Pi Imager: https://www.raspberrypi.com/software/
+2. Selectați: Raspberry Pi OS Bookworm 64-bit
+3. Flash pe card microSD
+4. Boot și conectare SSH: ssh pi@raspberrypi.local
 
 ================================================================================
 3. SETUP INIȚIAL SISTEM
 ================================================================================
 
-Conectare SSH:
-  ssh pi@raspberrypi.local
+Update sistem:
+  sudo apt update && sudo apt upgrade -y
 
-Update pachete:
-  sudo apt update
-  sudo apt upgrade -y
-  sudo apt autoremove -y
-
-Activare interfețe necesare:
+Activare interfețe (raspi-config):
   sudo raspi-config
-  # Navigați: Interfacing Options
-  # Activați: Camera, I2C, SPI, SSH
-  # Reboot: sudo reboot
+  # Interfacing Options → Camera, I2C, SPI, SSH → Enable
+  # Reboot
 
-După reboot, reconectare:
-  ssh pi@raspberrypi.local
-
-Instalare dependințe sistem:
-  sudo apt install -y \
-    git curl build-essential python3-dev \
-    libcamera-apps libraspberrypi-bin \
-    i2c-tools nodejs npm
-
-Instalare Node.js LTS (versiunea 20):
+Instalare dependințe:
+  sudo apt install -y git curl build-essential libcamera-apps i2c-tools
   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
   sudo apt install -y nodejs npm
-
-Verificare instalări:
-  node --version        # Trebuie v20.x.x
-  npm --version         # Trebuie 10.x.x
-  libcamera-hello       # Trebuie să afișeze help
 
 ================================================================================
 4. INSTALARE APLICAȚIE PE RASPBERRY PI
 ================================================================================
 
-Creare director aplicație:
-  mkdir -p ~/projects
-  cd ~/projects
-
-Clonare repository:
+Clonare și setup:
+  cd ~
   git clone https://github.com/DoctorBeryl/Braillescan-Mesh-Translator.git
   cd Braillescan-Mesh-Translator
-
-Instalare dependințe Node.js:
   npm install
-
-(Aceasta ia 3-5 minute pe Pi 3 A+)
-
-Verificare instalare:
-  npm list          # Trebuie să afișeze toți dependenții
 
 ================================================================================
 5. PORNIRE APLICAȚIE
 ================================================================================
 
-Mod Dezvoltare (cu hot reload):
+Pornire mod dezvoltare:
   cd ~/Braillescan-Mesh-Translator
   npm run dev
 
-Aplicația va afișa URL-urile accesabile
+Accesare browser:
+  http://raspberrypi.local:5173
 
-Accesare din browser:
-  De pe Pi:                   http://localhost:5173
-  De pe alt computer:         http://raspberrypi.local:5173
-                              (sau http://<PI_IP>:5173)
-
-Mod Producție:
-  1. Build: npm run build
-  2. Pornire: npm run server
-  3. Accesare: http://raspberrypi.local:3001
-
-Oprire aplicație:
-  Apăsați Ctrl+C în terminal
+Pornire mod producție:
+  npm run build
+  npm run server
+  # Accesare: http://raspberrypi.local:3001
 
 ================================================================================
 6. SETUP SERVICIU SYSTEMD (Auto-start la Boot)
 ================================================================================
 
-Creare fișier serviciu:
+Creare serviciu:
   sudo nano /etc/systemd/system/braillescan.service
 
-Adăugați conținuturile de mai jos:
-
----ÎNCEPUT FIȘIER---
+Adăugați:
+---
 [Unit]
 Description=BrailleScan Mesh Translator
 After=network.target
-Wants=network-online.target
 
 [Service]
 Type=simple
@@ -175,336 +97,30 @@ User=pi
 WorkingDirectory=/home/pi/Braillescan-Mesh-Translator
 ExecStart=/usr/bin/npm run dev
 Restart=always
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
+---
 
----SFÂRȘIT FIȘIER---
+Salvare (Ctrl+X, Y, Enter)
 
-Salvare și ieșire (Ctrl+X, apoi Y, Enter)
-
-Activare și pornire serviciu:
+Activare:
   sudo systemctl daemon-reload
   sudo systemctl enable braillescan.service
   sudo systemctl start braillescan.service
 
-Verificare status serviciu:
-  sudo systemctl status braillescan.service
-
-Vizualizare logs (timp real):
-  sudo journalctl -u braillescan.service -f
-
-Vizualizare logs (ultimi 50 linii):
-  sudo journalctl -u braillescan.service -n 50
-
-Oprire serviciu:
-  sudo systemctl stop braillescan.service
-
-Restart serviciu:
-  sudo systemctl restart braillescan.service
+Comenzi serviciu:
+  sudo systemctl status braillescan.service   # Status
+  sudo systemctl restart braillescan.service  # Restart
+  sudo journalctl -u braillescan.service -f   # Logs
 
 ================================================================================
-7. TESTARE HARDWARE ȘI VERIFICARE
+COMENZI RAPIDE
 ================================================================================
 
-Testare Cameră:
-  Listă camere disponibile:
-    libcamera-hello --list-cameras
-
-  Capturare imagine test:
-    libcamera-jpeg -o ~/test.jpg
-
-  Stream cameră (30 secunde):
-    rpicam-vid -t 30000 -o ~/test.h264
-
-  Informații detaliate cameră:
-    libcamera-hello --list-cameras --verbose
-
-Testare I2C (Senzori și Display):
-  Scan I2C bus 1:
-    i2cdetect -y 1
-
-  Test adresă specifică (exemplu: 0x29):
-    i2cget -y 1 0x29
-
-  Listă toți I2C buses:
-    i2cdetect -l
-
-Testare Sistem:
-  Temperatură CPU (trebuie <80°C):
-    vcgencmd measure_temp
-
-  Verificare throttling (valoare ne-zero = problem):
-    vcgencmd get_throttled
-
-  Monitor real-time sistem:
-    htop
-
-  Utilizare memorie:
-    free -h
-
-  Utilizare disk:
-    df -h
-
-  CPU load average:
-    cat /proc/loadavg
-
-================================================================================
-8. CONFIGURARE REȚEA
-================================================================================
-
-Liste rețele Wi-Fi disponibile:
-  nmcli dev wifi list
-
-Conectare la Wi-Fi:
-  nmcli dev wifi connect "SSID" password "PASSWORD"
-
-Verificare conexiune actuală:
-  nmcli con show
-  nmcli device status
-
-Deconectare Wi-Fi:
-  nmcli dev disconnect wlan1
-
-Ștergere conexiune salvată:
-  nmcli con delete "SSID"
-
-Setare IP static (opțional):
-  sudo nano /etc/dhcpcd.conf
-
-  Adăugați la sfârșit:
-    interface wlan1
-    static ip_address=192.168.1.100/24
-    static routers=192.168.1.1
-    static domain_name_servers=8.8.8.8
-
-  Reboot: sudo reboot
-
-Creare Access Point (AP Mode):
-  Install:
-    sudo apt install -y hostapd dnsmasq
-
-  Configurare:
-    sudo nano /etc/hostapd/hostapd.conf
-
-  Adăugați:
-    interface=wlan0
-    ssid=BrailleScan
-    wpa_passphrase=password123
-    wpa=2
-    wpa_key_mgmt=WPA-PSK
-    wpa_pairwise=CCMP
-
-  Activare:
-    sudo systemctl enable hostapd
-    sudo systemctl start hostapd
-    sudo systemctl enable dnsmasq
-    sudo systemctl start dnsmasq
-
-Testare conectivitate:
-  Ping Google:
-    ping 8.8.8.8
-
-  Verificare DNS:
-    nslookup google.com
-
-Aflare adresă IP:
-  ip addr show
-
-Localizare Pi pe rețea:
-  ping raspberrypi.local
-  (Sau nmap -p 22 192.168.1.0/24)
-
-================================================================================
-9. COMENZI REZOLVARE PROBLEME
-================================================================================
-
-Camera Nu Funcționează:
-
-  Verificare disponibilitate:
-    libcamera-hello --list-cameras
-
-  Activare cameră dacă nu funcționează:
-    sudo raspi-config
-    # Interface Options → Camera → Enable
-
-  Test verbose:
-    rpicam-hello -v
-
-  Verificare modul cameră:
-    vcgencmd get_camera
-
-Aplicația Nu Pornește:
-
-  Verificare porturi în uz (3000, 3001, 5173):
-    sudo lsof -i :3000
-    sudo lsof -i :3001
-    sudo lsof -i :5173
-
-  Kill process pe port (exemplu: 3001):
-    sudo kill -9 $(lsof -t -i:3001)
-
-  Verificare Node.js:
-    which node
-    node --version
-
-  Verificare npm modules:
-    ls node_modules | head -20
-
-  Ștergere cache și reinstalare:
-    npm cache clean --force
-    rm -rf node_modules package-lock.json
-    npm install
-
-Probleme Memorie:
-
-  Verificare memorie disponibilă:
-    free -h
-
-  Utilizare memorie per proces:
-    ps aux --sort=-%mem | head -20
-
-  Verificare utilizare swap:
-    free -h
-    (SwapUsed > 0 = swap activ = lent)
-
-Probleme Spațiu Disk:
-
-  Verificare disk:
-    df -h /
-
-  Fișiere mari:
-    du -sh ~/* | sort -rh | head -20
-
-  Curățare logs vechi:
-    sudo journalctl --disk-usage
-    sudo journalctl --vacuum-time=3d
-
-  Curățare cache pachete:
-    sudo apt clean
-    sudo apt autoclean
-
-Probleme Performance:
-
-  Monitor temperatură (real-time):
-    watch -n 1 vcgencmd measure_temp
-
-  Verificare throttling:
-    vcgencmd get_throttled
-
-  Procese top:
-    top
-
-  Verificare Wi-Fi:
-    iwconfig
-
-Probleme SSH:
-
-  Autentificare cu SSH key (recomandat):
-    ssh-keygen -t ed25519
-    ssh-copy-id -i ~/.ssh/id_ed25519.pub pi@raspberrypi.local
-
-  SSH verbose (pentru debug):
-    ssh -vvv pi@raspberrypi.local
-
-  Status serviciu SSH:
-    sudo systemctl status ssh
-
-  Restart SSH:
-    sudo systemctl restart ssh
-
-================================================================================
-10. ÎNTREȚINERE ȘI ACTUALIZĂRI
-================================================================================
-
-Actualizare Aplicație:
-
-  Fetch ultimeile modificări:
-    cd ~/Braillescan-Mesh-Translator
-    git fetch origin
-
-  Vedere ce s-a schimbat:
-    git log --oneline origin/main ^HEAD
-
-  Pull ultim cod:
-    git pull origin main
-
-  Actualizare dependințe (dacă s-au schimbat):
-    npm install
-
-  Restart aplicație:
-    sudo systemctl restart braillescan.service
-
-  Verificare actualizare:
-    git log -1 --oneline
-
-Actualizare Pachete Sistem:
-
-  Update lista pachete:
-    sudo apt update
-
-  Upgrade pachete:
-    sudo apt upgrade -y
-
-  Ștergere pachete vechi:
-    sudo apt autoremove -y
-
-  Reparare dependințe rupte:
-    sudo apt --fix-broken install
-
-  Full upgrade (rar):
-    sudo apt full-upgrade -y
-
-Backup:
-
-  Backup aplicație:
-    tar -czf ~/braillescan-backup.tar.gz ~/Braillescan-Mesh-Translator
-
-  Backup card SD (de pe alt computer):
-    sudo dd if=/dev/sdX of=./braillescan-backup.img bs=4M
-
-  Copy fișiere de pe Pi:
-    scp -r pi@raspberrypi.local:~/Braillescan-Mesh-Translator .
-
-Curățare:
-
-  Ștergere git history vechi:
-    cd ~/Braillescan-Mesh-Translator
-    git gc --aggressive
-
-  Curățare cache npm:
-    npm cache clean --force
-
-  Ștergere build artifacts:
-    rm -rf dist/
-
-  Ștergere fișiere temporare:
-    rm -rf /tmp/*
-    sudo rm -rf /var/tmp/*
-
-Vizualizare Logs Sistem:
-
-  Log ultimul boot:
-    sudo journalctl -b
-
-  Ultimele 100 mesaje kernel:
-    dmesg | tail -100
-
-  Logs de la o oră în urmă:
-    sudo journalctl --since "1 hour ago"
-
-  Monitor logs real-time:
-    sudo tail -f /var/log/syslog
-
-================================================================================
-
-PENTRU MAI MULTE INFORMAȚII:
-  - README.md - Documentație completă
-  - GitHub: https://github.com/DoctorBeryl/Braillescan-Mesh-Translator
-  - Docs oficiale: https://www.raspberrypi.com/documentation/
-
-ULTIM ACTUALIZAT: Iulie 2026
-================================================================================
+npm run dev       - Pornire mod dezvoltare
+npm run build     - Build producție
+npm run server    - Pornire server (după build)
+npm run lint      - Rulare linter
+
+===============================================================================

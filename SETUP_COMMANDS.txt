@@ -27,6 +27,7 @@ Clonare repository:
 
 Instalare dependințe:
   npm install
+  npm i concurrently --save-dev
 
 Pornire server de dezvoltare (frontend + backend):
   npm run dev

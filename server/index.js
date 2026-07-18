@@ -1,5 +1,8 @@
 import express from 'express'
 import { execFile, spawn } from 'child_process'
+import { translate } from '@vitalets/google-translate-api'
+import os from 'node:os'
+import fs from 'node:fs/promises'
 
 const WIFI_IFACE = 'wlan1'
 const PORT = process.env.WIFI_SERVER_PORT || 3001
@@ -10,6 +13,14 @@ const CAMERA_LIST_BINARIES = ['rpicam-hello', 'libcamera-hello']
 const CAMERA_VIDEO_BINARY_FOR = {
   'rpicam-hello': 'rpicam-vid',
   'libcamera-hello': 'libcamera-vid',
+}
+const CAMERA_TARGET_FPS = 15
+
+const cameraStats = {
+  streaming: false,
+  startedAt: null,
+  lastFrameAt: null,
+  frameTimestamps: [],
 }
 
 const app = express()
@@ -94,6 +105,33 @@ app.get('/api/wifi/networks', async (_req, res) => {
   }
 })
 
+app.get('/api/wifi/status', async (_req, res) => {
+  try {
+    const stdout = await run('nmcli', [
+      '-t',
+      '-f', 'SSID,SIGNAL,IN-USE',
+      'device', 'wifi', 'list',
+      'ifname', WIFI_IFACE,
+    ])
+
+    let ssid = null
+    let signal = null
+    for (const line of stdout.split('\n')) {
+      if (!line.trim()) continue
+      const [name, sig, inUse] = parseTerseLine(line)
+      if (inUse === '*' && name) {
+        ssid = name
+        signal = Number(sig)
+        if (Number.isNaN(signal)) signal = null
+        break
+      }
+    }
+    res.json({ connected: Boolean(ssid), ssid, signal })
+  } catch (err) {
+    res.status(500).json({ connected: false, ssid: null, signal: null, message: err.message })
+  }
+})
+
 function isValidSsid(ssid) {
   return typeof ssid === 'string' && ssid.length > 0 && ssid.length <= 32
 }
@@ -166,17 +204,24 @@ app.get('/api/camera/stream', async (req, res) => {
     '-o', '-',
     '--width', '640',
     '--height', '480',
-    '--framerate', '15',
+    '--framerate', String(CAMERA_TARGET_FPS),
     '--nopreview',
   ])
 
+  cameraStats.streaming = true
+  cameraStats.startedAt = Date.now()
+  cameraStats.lastFrameAt = null
+  cameraStats.frameTimestamps = []
+
   const cleanup = () => {
     child.kill('SIGTERM')
+    cameraStats.streaming = false
   }
   req.on('close', cleanup)
   res.on('close', cleanup)
 
   child.on('error', (err) => {
+    cameraStats.streaming = false
     if (!res.headersSent) {
       res.status(500).json({ message: err.message })
     } else if (!res.writableEnded) {
@@ -184,6 +229,7 @@ app.get('/api/camera/stream', async (req, res) => {
     }
   })
   child.on('exit', () => {
+    cameraStats.streaming = false
     if (!res.writableEnded) res.end()
   })
 
@@ -214,11 +260,198 @@ app.get('/api/camera/stream', async (req, res) => {
       const frame = buffer.subarray(start, end + JPEG_EOI.length)
       buffer = buffer.subarray(end + JPEG_EOI.length)
 
+      const now = Date.now()
+      cameraStats.lastFrameAt = now
+      cameraStats.frameTimestamps.push(now)
+      const cutoff = now - 2000
+      while (cameraStats.frameTimestamps.length && cameraStats.frameTimestamps[0] < cutoff) {
+        cameraStats.frameTimestamps.shift()
+      }
+
       res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\n\r\n`)
       res.write(frame)
       res.write('\r\n')
     }
   })
+})
+
+app.get('/api/camera/stats', (_req, res) => {
+  const now = Date.now()
+  const recentFrames = cameraStats.frameTimestamps.filter((t) => t >= now - 2000)
+  const fps = cameraStats.streaming ? Math.round((recentFrames.length / 2) * 10) / 10 : 0
+  const frameSyncOk = cameraStats.streaming
+    && cameraStats.lastFrameAt !== null
+    && (now - cameraStats.lastFrameAt) < 2000
+  const dropRatePercent = cameraStats.streaming
+    ? Math.max(0, Math.round(((CAMERA_TARGET_FPS - fps) / CAMERA_TARGET_FPS) * 100))
+    : null
+  const streamUptimeSeconds = cameraStats.streaming && cameraStats.startedAt
+    ? Math.round((now - cameraStats.startedAt) / 1000)
+    : 0
+
+  res.json({
+    streaming: cameraStats.streaming,
+    fps,
+    frameSyncOk,
+    dropRatePercent,
+    streamUptimeSeconds,
+  })
+})
+
+app.get('/api/ping', (_req, res) => {
+  res.json({ ok: true, ts: Date.now() })
+})
+
+async function readCpuTempC() {
+  try {
+    const raw = await fs.readFile('/sys/class/thermal/thermal_zone0/temp', 'utf8')
+    return Math.round((Number(raw.trim()) / 1000) * 10) / 10
+  } catch {
+    return null
+  }
+}
+
+async function readThrottled() {
+  try {
+    const stdout = await run('vcgencmd', ['get_throttled'])
+    const match = stdout.match(/0x([0-9a-fA-F]+)/)
+    if (!match) return null
+    const bits = parseInt(match[1], 16)
+    return Boolean(bits & 0x4)
+  } catch {
+    return null
+  }
+}
+
+async function readSwapUsedBytes() {
+  try {
+    const raw = await fs.readFile('/proc/meminfo', 'utf8')
+    const total = Number(raw.match(/SwapTotal:\s+(\d+)/)?.[1])
+    const free = Number(raw.match(/SwapFree:\s+(\d+)/)?.[1])
+    if (!Number.isFinite(total)) return null
+    return (total - free) * 1024
+  } catch {
+    return null
+  }
+}
+
+async function readStorage() {
+  try {
+    if (typeof fs.statfs !== 'function') return null
+    const stats = await fs.statfs('/')
+    const totalBytes = stats.blocks * stats.bsize
+    const freeBytes = stats.bavail * stats.bsize
+    const usedPercent = totalBytes ? Math.round(((totalBytes - freeBytes) / totalBytes) * 100) : null
+    return { totalBytes, freeBytes, usedPercent }
+  } catch {
+    return null
+  }
+}
+
+app.get('/api/system/stats', async (_req, res) => {
+  const cpuCount = os.cpus().length || 1
+  const cpuLoadPercent = Math.min(100, Math.round((os.loadavg()[0] / cpuCount) * 100))
+
+  const [cpuTempC, throttled, swapUsedBytes, storage] = await Promise.all([
+    readCpuTempC(),
+    readThrottled(),
+    readSwapUsedBytes(),
+    readStorage(),
+  ])
+
+  res.json({
+    uptimeSeconds: os.uptime(),
+    memory: { totalBytes: os.totalmem(), freeBytes: os.freemem() },
+    cpuLoadPercent,
+    cpuTempC,
+    throttled,
+    swapUsedBytes,
+    storage,
+  })
+})
+
+const SYSTEM_COMMANDS = {
+  reboot: { label: 'Reboot device', cmd: 'reboot', args: [] },
+  poweroff: { label: 'Power off device', cmd: 'poweroff', args: [] },
+  'restart-network': { label: 'Restart Wi-Fi interface', cmd: 'nmcli', args: ['device', 'reconnect', WIFI_IFACE] },
+  'disk-usage': { label: 'Check disk usage', cmd: 'df', args: ['-h'] },
+}
+
+app.get('/api/system/commands', (_req, res) => {
+  res.json({
+    commands: Object.entries(SYSTEM_COMMANDS).map(([id, entry]) => ({ id, label: entry.label })),
+  })
+})
+
+app.post('/api/system/command', async (req, res) => {
+  const { command } = req.body ?? {}
+  const entry = SYSTEM_COMMANDS[command]
+  if (!entry) {
+    res.status(400).json({ success: false, message: 'Unknown command.' })
+    return
+  }
+
+  try {
+    const stdout = await run(entry.cmd, entry.args)
+    res.json({ success: true, output: stdout.trim() })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
+  }
+})
+
+const TRANSLATE_LANGUAGES = [
+  ['af', 'Afrikaans'], ['sq', 'Albanian'], ['am', 'Amharic'], ['ar', 'Arabic'],
+  ['hy', 'Armenian'], ['az', 'Azerbaijani'], ['eu', 'Basque'], ['be', 'Belarusian'],
+  ['bn', 'Bengali'], ['bs', 'Bosnian'], ['bg', 'Bulgarian'], ['ca', 'Catalan'],
+  ['ceb', 'Cebuano'], ['ny', 'Chichewa'], ['zh-CN', 'Chinese (Simplified)'],
+  ['zh-TW', 'Chinese (Traditional)'], ['co', 'Corsican'], ['hr', 'Croatian'],
+  ['cs', 'Czech'], ['da', 'Danish'], ['nl', 'Dutch'], ['en', 'English'],
+  ['eo', 'Esperanto'], ['et', 'Estonian'], ['tl', 'Filipino'], ['fi', 'Finnish'],
+  ['fr', 'French'], ['fy', 'Frisian'], ['gl', 'Galician'], ['ka', 'Georgian'],
+  ['de', 'German'], ['el', 'Greek'], ['gu', 'Gujarati'], ['ht', 'Haitian Creole'],
+  ['ha', 'Hausa'], ['haw', 'Hawaiian'], ['he', 'Hebrew'], ['hi', 'Hindi'],
+  ['hmn', 'Hmong'], ['hu', 'Hungarian'], ['is', 'Icelandic'], ['ig', 'Igbo'],
+  ['id', 'Indonesian'], ['ga', 'Irish'], ['it', 'Italian'], ['ja', 'Japanese'],
+  ['jw', 'Javanese'], ['kn', 'Kannada'], ['kk', 'Kazakh'], ['km', 'Khmer'],
+  ['rw', 'Kinyarwanda'], ['ko', 'Korean'], ['ku', 'Kurdish'], ['ky', 'Kyrgyz'],
+  ['lo', 'Lao'], ['la', 'Latin'], ['lv', 'Latvian'], ['lt', 'Lithuanian'],
+  ['lb', 'Luxembourgish'], ['mk', 'Macedonian'], ['mg', 'Malagasy'], ['ms', 'Malay'],
+  ['ml', 'Malayalam'], ['mt', 'Maltese'], ['mi', 'Maori'], ['mr', 'Marathi'],
+  ['mn', 'Mongolian'], ['my', 'Myanmar (Burmese)'], ['ne', 'Nepali'],
+  ['no', 'Norwegian'], ['or', 'Odia'], ['ps', 'Pashto'], ['fa', 'Persian'],
+  ['pl', 'Polish'], ['pt', 'Portuguese'], ['pa', 'Punjabi'], ['ro', 'Romanian'],
+  ['ru', 'Russian'], ['sm', 'Samoan'], ['gd', 'Scots Gaelic'], ['sr', 'Serbian'],
+  ['st', 'Sesotho'], ['sn', 'Shona'], ['sd', 'Sindhi'], ['si', 'Sinhala'],
+  ['sk', 'Slovak'], ['sl', 'Slovenian'], ['so', 'Somali'], ['es', 'Spanish'],
+  ['su', 'Sundanese'], ['sw', 'Swahili'], ['sv', 'Swedish'], ['tg', 'Tajik'],
+  ['ta', 'Tamil'], ['tt', 'Tatar'], ['te', 'Telugu'], ['th', 'Thai'],
+  ['tr', 'Turkish'], ['tk', 'Turkmen'], ['uk', 'Ukrainian'], ['ur', 'Urdu'],
+  ['ug', 'Uyghur'], ['uz', 'Uzbek'], ['vi', 'Vietnamese'], ['cy', 'Welsh'],
+  ['xh', 'Xhosa'], ['yi', 'Yiddish'], ['yo', 'Yoruba'], ['zu', 'Zulu'],
+].map(([code, name]) => ({ code, name }))
+
+app.get('/api/translate/languages', (_req, res) => {
+  res.json({ languages: TRANSLATE_LANGUAGES })
+})
+
+app.post('/api/translate', async (req, res) => {
+  const { text, to } = req.body ?? {}
+
+  if (typeof text !== 'string' || !text.trim() || text.length > 2000) {
+    res.status(400).json({ message: 'Text must be 1-2000 characters.' })
+    return
+  }
+  if (typeof to !== 'string' || !TRANSLATE_LANGUAGES.some((lang) => lang.code === to)) {
+    res.status(400).json({ message: 'Unsupported target language.' })
+    return
+  }
+
+  try {
+    const result = await translate(text, { to })
+    res.json({ translated: result.text, from: result.raw?.src || null })
+  } catch (err) {
+    res.status(502).json({ message: err.message })
+  }
 })
 
 app.listen(PORT, () => {

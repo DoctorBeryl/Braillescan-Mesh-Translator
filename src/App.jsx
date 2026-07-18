@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Aperture, Box, Bug, ExternalLink, Home as HomeIcon, Languages as LanguagesIcon, Moon, Palette, Settings, Sun, Type, Video, Wifi, X } from 'lucide-react'
+import { Activity, Aperture, Box, Bug, Clock, Cpu, Crosshair, Download, ExternalLink, Focus, Gauge, HardDrive, Home as HomeIcon, Image as ImageIcon, KeyRound, Languages as LanguagesIcon, Loader2, LogIn, LogOut, Lock, Moon, Palette, Settings, ShieldCheck, Sun, Terminal, Type, Video, Wifi, X } from 'lucide-react'
 import WifiPanel from './components/WifiPanel'
 import CameraStream from './components/CameraStream'
 
@@ -30,24 +30,252 @@ const headerCaptions = {
   Translation: 'Real-time translation',
   Debug: 'System diagnostics',
 }
-const languages = ['English', 'Spanish', 'French', 'Japanese']
-const debugEntries = Array.from({ length: 18 }, (_, index) => ({
-  id: index,
-  label: `Entry ${index + 1}`,
-  value: index % 2 === 0 ? 'Stable' : 'Queued',
-}))
+const translationSampleText = 'Hello, welcome to the Pi Translator.'
+const idealFocalDistanceCm = 30
+const ADMIN_USERNAME = 'admin'
+const ADMIN_PASSWORD = 'password'
+const fallbackSystemCommands = [
+  { id: 'reboot', label: 'Reboot device' },
+  { id: 'poweroff', label: 'Power off device' },
+  { id: 'restart-network', label: 'Restart Wi-Fi interface' },
+  { id: 'disk-usage', label: 'Check disk usage' },
+]
+const fallbackLanguages = [
+  { code: 'en', name: 'English' },
+  { code: 'es', name: 'Spanish' },
+  { code: 'fr', name: 'French' },
+  { code: 'ja', name: 'Japanese' },
+]
+function formatUptime(totalSeconds) {
+  if (totalSeconds == null || Number.isNaN(totalSeconds)) return 'Unavailable'
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  if (hours === 0) return `${minutes}m`
+  return `${hours}h ${minutes}m`
+}
+
+function formatBytes(bytes) {
+  if (bytes == null || Number.isNaN(bytes)) return 'Unavailable'
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+  return `${Math.round(bytes / 1024 ** 2)} MB`
+}
 
 function App() {
   const [activeTab, setActiveTab] = useState('Home')
-  const [selectedLanguage, setSelectedLanguage] = useState('English')
+  const [languages, setLanguages] = useState(fallbackLanguages)
+  const [targetLang, setTargetLang] = useState('en')
   const [showTranslation, setShowTranslation] = useState(true)
+  const [translatedText, setTranslatedText] = useState('')
+  const [translating, setTranslating] = useState(false)
+  const [translateError, setTranslateError] = useState('')
   const [compileProgress, setCompileProgress] = useState(42)
+  const [modelExported, setModelExported] = useState(false)
   const [autoRotate, setAutoRotate] = useState(true)
   const [theme, setTheme] = useState('dark')
   const [textPercent, setTextPercent] = useState(100)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [wifiOpen, setWifiOpen] = useState(false)
+  const [cameraChecked, setCameraChecked] = useState(false)
+  const [cameraAvailable, setCameraAvailable] = useState(false)
+  const [cameraStreaming, setCameraStreaming] = useState(false)
+  const [wifiStatus, setWifiStatus] = useState({ checked: false, connected: false, ssid: null, signal: null })
+  const [latencyMs, setLatencyMs] = useState(null)
+  const [storedImages, setStoredImages] = useState(486)
+  const [sharpness, setSharpness] = useState(88)
+  const [distanceToSurface, setDistanceToSurface] = useState(45)
+  const [systemStats, setSystemStats] = useState(null)
+  const [cameraStats, setCameraStats] = useState(null)
+  const [authenticated, setAuthenticated] = useState(false)
+  const [authUsername, setAuthUsername] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authError, setAuthError] = useState('')
+  const [systemCommands, setSystemCommands] = useState(fallbackSystemCommands)
+  const [selectedCommand, setSelectedCommand] = useState('reboot')
+  const [commandRunning, setCommandRunning] = useState(false)
+  const [commandResult, setCommandResult] = useState(null)
+  const [exporting, setExporting] = useState(false)
+  const [exportError, setExportError] = useState('')
   const settingsRef = useRef(null)
+  const modelViewerRef = useRef(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/camera/status')
+      .then((response) => response.json())
+      .then((data) => {
+        if (cancelled) return
+        setCameraAvailable(Boolean(data.available))
+        setCameraChecked(true)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setCameraAvailable(false)
+        setCameraChecked(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const checkWifi = () => {
+      fetch('/api/wifi/status')
+        .then((response) => response.json())
+        .then((data) => {
+          if (cancelled) return
+          setWifiStatus({ checked: true, connected: Boolean(data.connected), ssid: data.ssid || null, signal: data.signal ?? null })
+        })
+        .catch(() => {
+          if (cancelled) return
+          setWifiStatus({ checked: true, connected: false, ssid: null, signal: null })
+        })
+    }
+    checkWifi()
+    const interval = setInterval(checkWifi, 15000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const ping = () => {
+      const start = performance.now()
+      fetch('/api/ping')
+        .then((response) => {
+          if (!response.ok) throw new Error('unreachable')
+          return response.json()
+        })
+        .then(() => {
+          if (cancelled) return
+          setLatencyMs(Math.round(performance.now() - start))
+        })
+        .catch(() => {
+          if (cancelled) return
+          setLatencyMs(null)
+        })
+    }
+    ping()
+    const interval = setInterval(ping, 5000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const poll = () => {
+      fetch('/api/system/stats')
+        .then((response) => response.json())
+        .then((data) => {
+          if (!cancelled) setSystemStats(data)
+        })
+        .catch(() => {
+          if (!cancelled) setSystemStats(null)
+        })
+    }
+    poll()
+    const interval = setInterval(poll, 5000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const poll = () => {
+      fetch('/api/camera/stats')
+        .then((response) => response.json())
+        .then((data) => {
+          if (!cancelled) setCameraStats(data)
+        })
+        .catch(() => {
+          if (!cancelled) setCameraStats(null)
+        })
+    }
+    poll()
+    const interval = setInterval(poll, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetch('/api/translate/languages')
+      .then((response) => response.json())
+      .then((data) => {
+        if (Array.isArray(data.languages) && data.languages.length > 0) {
+          setLanguages(data.languages)
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    fetch('/api/system/commands')
+      .then((response) => response.json())
+      .then((data) => {
+        if (Array.isArray(data.commands) && data.commands.length > 0) {
+          setSystemCommands(data.commands)
+          setSelectedCommand(data.commands[0].id)
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!showTranslation) {
+      setTranslatedText('')
+      setTranslateError('')
+      return
+    }
+    let cancelled = false
+    setTranslating(true)
+    setTranslateError('')
+    fetch('/api/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: translationSampleText, to: targetLang }),
+    })
+      .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (cancelled) return
+        if (!ok) throw new Error(data.message || 'Translation failed.')
+        setTranslatedText(data.translated || '')
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setTranslatedText('')
+        setTranslateError(err.message || 'Translation failed.')
+      })
+      .finally(() => {
+        if (!cancelled) setTranslating(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [targetLang, showTranslation])
+
+  useEffect(() => {
+    if (!cameraStreaming) return
+    const interval = setInterval(() => {
+      setStoredImages((value) => value + 1)
+      setSharpness((value) => {
+        const next = value + (Math.random() * 6 - 3)
+        return Math.max(58, Math.min(97, Math.round(next)))
+      })
+      setDistanceToSurface((value) => {
+        const next = value + (Math.random() * 8 - 4)
+        return Math.max(15, Math.min(90, Math.round(next)))
+      })
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [cameraStreaming])
 
   useEffect(() => {
     const handlePointerDown = (event) => {
@@ -165,28 +393,128 @@ function App() {
     setCompileProgress((value) => Math.min(100, value + 18))
   }
 
+  const handleExport = async () => {
+    const viewer = modelViewerRef.current
+    if (!viewer || typeof viewer.exportScene !== 'function') {
+      setExportError('The 3D viewer is not ready yet.')
+      return
+    }
+
+    setExporting(true)
+    setExportError('')
+    try {
+      const blob = await viewer.exportScene({ binary: true })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'pi-translator-model.glb'
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      setModelExported(true)
+    } catch (err) {
+      setExportError(err.message || 'Export failed.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const handleLogin = (event) => {
+    event.preventDefault()
+    if (authUsername === ADMIN_USERNAME && authPassword === ADMIN_PASSWORD) {
+      setAuthenticated(true)
+      setAuthError('')
+      setAuthPassword('')
+    } else {
+      setAuthError('Incorrect username or password.')
+    }
+  }
+
+  const handleLogout = () => {
+    setAuthenticated(false)
+    setAuthUsername('')
+    setAuthPassword('')
+    setAuthError('')
+    setCommandResult(null)
+  }
+
+  const handleRunCommand = async () => {
+    if (!authenticated) return
+    const entry = systemCommands.find((command) => command.id === selectedCommand)
+    if (!entry) return
+    if (!window.confirm(`Run "${entry.label}" on the device?`)) return
+
+    setCommandRunning(true)
+    setCommandResult(null)
+    try {
+      const response = await fetch('/api/system/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: selectedCommand }),
+      })
+      const data = await response.json()
+      setCommandResult({ success: Boolean(data.success), message: data.output || data.message || '' })
+    } catch (err) {
+      setCommandResult({ success: false, message: err.message })
+    } finally {
+      setCommandRunning(false)
+    }
+  }
+
   const renderTabContent = () => {
     if (activeTab === 'Livestream') {
       return (
         <div className="grid gap-3 lg:grid-cols-[1.25fr_0.75fr]">
-          <CameraStream tone={tone} themePalette={themePalette} />
+          <CameraStream
+            tone={tone}
+            themePalette={themePalette}
+            checked={cameraChecked}
+            available={cameraAvailable}
+            onStreamingChange={setCameraStreaming}
+          />
 
           <div className={`space-y-2 rounded-2xl border p-3 ${themePalette.card}`}>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <p className={`text-[10px] uppercase ${themePalette.muted}`}>Router</p>
-              <p className={`mt-1 font-medium ${themePalette.text}`}>10.42.0.1</p>
+              <div className="flex items-center justify-between">
+                <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>
+                  <ImageIcon className="h-3 w-3" strokeWidth={2.25} />
+                  Stored images
+                </p>
+              </div>
+              <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{storedImages.toLocaleString()}</p>
             </div>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <p className={`text-[10px] uppercase ${themePalette.muted}`}>Local</p>
-              <p className={`mt-1 text-sm ${themePalette.secondary}`}>Wi-Fi clients can reach it locally.</p>
+              <div className="mb-1 flex items-center justify-between text-[10px] uppercase">
+                <p className={`flex items-center gap-1.5 ${themePalette.muted}`}>
+                  <Gauge className="h-3 w-3" strokeWidth={2.25} />
+                  Sharpness
+                </p>
+                <span className={themePalette.text}>{cameraStreaming ? `${sharpness}%` : '—'}</span>
+              </div>
+              <div className={`h-2 rounded-full ${tone.strong}`}>
+                <div className={`h-2 rounded-full ${tone.dot} transition-all`} style={{ width: `${cameraStreaming ? sharpness : 0}%` }} />
+              </div>
+            </div>
+            <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
+              <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>
+                <Crosshair className="h-3 w-3" strokeWidth={2.25} />
+                Distance to surface
+              </p>
+              <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{cameraStreaming ? `${distanceToSurface} cm` : '— cm'}</p>
+            </div>
+            <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
+              <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>
+                <Focus className="h-3 w-3" strokeWidth={2.25} />
+                Ideal focal distance
+              </p>
+              <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{idealFocalDistanceCm} cm</p>
             </div>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
               <p className={`text-[10px] uppercase ${themePalette.muted}`}>Session</p>
-              <p className={`mt-1 text-sm ${themePalette.secondary}`}>Streaming session active for the past 6 minutes.</p>
-            </div>
-            <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <p className={`text-[10px] uppercase ${themePalette.muted}`}>Notes</p>
-              <p className={`mt-1 text-sm ${themePalette.secondary}`}>Frame sync is stable and ready for review.</p>
+              <p className={`mt-1 text-sm ${themePalette.secondary}`}>
+                {cameraStreaming ? 'Streaming session is active right now.' : 'No active streaming session.'}
+              </p>
             </div>
           </div>
         </div>
@@ -218,6 +546,7 @@ function App() {
 
             <div className={`min-h-[300px] overflow-hidden rounded-xl border ${themePalette.surface}`}>
               <model-viewer
+                ref={modelViewerRef}
                 src="/src/assets/braille.glb"
                 alt="Reconstructed 3D scan preview"
                 camera-controls
@@ -232,6 +561,13 @@ function App() {
           </div>
 
           <div className={`space-y-2 rounded-2xl border p-3 ${themePalette.card}`}>
+            <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
+              <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>
+                <ImageIcon className="h-3 w-3" strokeWidth={2.25} />
+                Stored images
+              </p>
+              <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{storedImages.toLocaleString()}</p>
+            </div>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
               <p className={`text-[10px] uppercase ${themePalette.muted}`}>Compile</p>
               <button
@@ -252,12 +588,19 @@ function App() {
               </div>
             </div>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <p className={`text-[10px] uppercase ${themePalette.muted}`}>Model</p>
-              <p className={`mt-1 text-sm ${themePalette.secondary}`}>Preview mesh is ready for a new export pass.</p>
-            </div>
-            <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <p className={`text-[10px] uppercase ${themePalette.muted}`}>Hint</p>
-              <p className={`mt-1 text-sm ${themePalette.secondary}`}>Drag to orbit, scroll to zoom, and inspect the reconstruction from any angle.</p>
+              <p className={`text-[10px] uppercase ${themePalette.muted}`}>Export</p>
+              <button
+                type="button"
+                onClick={handleExport}
+                disabled={compileProgress < 100 || exporting}
+                className={`mt-2 flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${tone.button}`}
+              >
+                {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2.25} /> : <Download className="h-3.5 w-3.5" strokeWidth={2.25} />}
+                {exporting ? 'Exporting…' : modelExported ? 'Model exported (.glb)' : 'Export model (.glb)'}
+              </button>
+              <p className={`mt-1.5 text-xs ${exportError ? 'text-red-400' : themePalette.muted}`}>
+                {exportError || (compileProgress < 100 ? 'Finish compiling to enable export.' : 'Downloads the live scene as a glTF 2.0 binary file.')}
+              </p>
             </div>
           </div>
         </div>
@@ -302,17 +645,17 @@ function App() {
 
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
               <label className={`mb-1 block text-[10px] uppercase ${themePalette.muted}`} htmlFor="language">
-                Language
+                Language ({languages.length} available)
               </label>
               <select
                 id="language"
-                value={selectedLanguage}
-                onChange={(event) => setSelectedLanguage(event.target.value)}
+                value={targetLang}
+                onChange={(event) => setTargetLang(event.target.value)}
                 className={`w-full rounded-xl border px-3 py-2 text-sm outline-none ${themePalette.outline} ${theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white text-slate-900'}`}
               >
                 {languages.map((language) => (
-                  <option key={language} value={language}>
-                    {language}
+                  <option key={language.code} value={language.code}>
+                    {language.name}
                   </option>
                 ))}
               </select>
@@ -320,11 +663,22 @@ function App() {
 
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
               <p className={`text-[10px] uppercase ${themePalette.muted}`}>Preview</p>
-              <p className={`mt-1 text-sm ${themePalette.secondary}`}>Output will appear here in {selectedLanguage}.</p>
+              {!showTranslation ? (
+                <p className={`mt-1 text-sm ${themePalette.secondary}`}>Live translation is off.</p>
+              ) : translating ? (
+                <p className={`mt-1 flex items-center gap-1.5 text-sm ${themePalette.secondary}`}>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2.25} />
+                  Translating…
+                </p>
+              ) : translateError ? (
+                <p className="mt-1 text-sm text-red-400">{translateError}</p>
+              ) : (
+                <p className={`mt-1 text-sm ${themePalette.secondary}`}>{translatedText || 'Output will appear here.'}</p>
+              )}
             </div>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <p className={`text-[10px] uppercase ${themePalette.muted}`}>Context</p>
-              <p className={`mt-1 text-sm ${themePalette.secondary}`}>The current view is prepared for quick language switching.</p>
+              <p className={`text-[10px] uppercase ${themePalette.muted}`}>Source</p>
+              <p className={`mt-1 text-sm ${themePalette.secondary}`}>"{translationSampleText}"</p>
             </div>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
               <p className={`text-[10px] uppercase ${themePalette.muted}`}>Next</p>
@@ -336,15 +690,59 @@ function App() {
     }
 
     if (activeTab === 'Debug') {
+      const detailedDiagnostics = [
+        {
+          label: 'CPU temperature',
+          value: systemStats?.cpuTempC != null ? `${systemStats.cpuTempC}°C` : 'Unavailable',
+          ok: systemStats?.cpuTempC == null ? null : systemStats.cpuTempC < 70,
+        },
+        {
+          label: 'Thermal throttling',
+          value: systemStats?.throttled == null ? 'Unavailable' : systemStats.throttled ? 'Active' : 'Not active',
+          ok: systemStats?.throttled == null ? null : !systemStats.throttled,
+        },
+        {
+          label: 'Memory free',
+          value: systemStats ? formatBytes(systemStats.memory.freeBytes) : 'Unavailable',
+          ok: systemStats ? systemStats.memory.freeBytes / systemStats.memory.totalBytes > 0.1 : null,
+        },
+        {
+          label: 'Swap usage',
+          value: systemStats?.swapUsedBytes == null ? 'Unavailable' : formatBytes(systemStats.swapUsedBytes),
+          ok: systemStats?.swapUsedBytes == null ? null : systemStats.swapUsedBytes < 256 * 1024 * 1024,
+        },
+        {
+          label: 'Storage free space',
+          value: systemStats?.storage ? formatBytes(systemStats.storage.freeBytes) : 'Unavailable',
+          ok: systemStats?.storage ? systemStats.storage.usedPercent < 90 : null,
+        },
+        {
+          label: 'Wi-Fi signal strength',
+          value: wifiStatus.connected && wifiStatus.signal != null ? `${wifiStatus.signal}%` : 'Not connected',
+          ok: wifiStatus.connected && wifiStatus.signal != null ? wifiStatus.signal > 40 : null,
+        },
+        {
+          label: 'Camera frame drop rate',
+          value: cameraStats?.streaming ? `${cameraStats.dropRatePercent}%` : 'Idle',
+          ok: cameraStats?.streaming ? cameraStats.dropRatePercent < 15 : null,
+        },
+        {
+          label: 'Camera stream uptime',
+          value: cameraStats?.streaming ? formatUptime(cameraStats.streamUptimeSeconds) : 'Not streaming',
+          ok: cameraStats?.streaming ? true : null,
+        },
+      ]
+
       return (
         <div className="space-y-3">
           <div className={`rounded-2xl border p-3 shadow-[0_0_0_1px_rgba(255,255,255,0.03),0_8px_24px_rgba(0,0,0,0.18)] ${tone.strong} ${themePalette.card}`}>
+            <p className={`mb-2 text-[10px] uppercase tracking-[0.15em] ${themePalette.muted}`}>Key diagnostics</p>
             <div className="grid gap-2 md:grid-cols-2">
               {[
-                ['Latency', '16 ms'],
-                ['Images/sec', '12.4'],
-                ['Frame sync', 'Stable'],
-                ['CPU load', '34%'],
+                ['Latency', latencyMs === null ? 'Unreachable' : `${latencyMs} ms`],
+                ['Images/sec', cameraStats?.streaming ? `${cameraStats.fps}` : '0'],
+                ['Frame sync', !cameraStats?.streaming ? 'Idle' : cameraStats.frameSyncOk ? 'Stable' : 'Degraded'],
+                ['CPU load', systemStats?.cpuLoadPercent != null ? `${systemStats.cpuLoadPercent}%` : 'Unavailable'],
               ].map(([label, value]) => (
                 <div key={label} className={`rounded-xl border p-2 ${themePalette.surface}`}>
                   <p className={`text-[10px] uppercase ${themePalette.muted}`}>{label}</p>
@@ -354,18 +752,64 @@ function App() {
             </div>
           </div>
 
+          <div className={`rounded-2xl border p-3 shadow-[0_0_0_1px_rgba(255,255,255,0.03),0_8px_24px_rgba(0,0,0,0.18)] ${tone.strong} ${themePalette.card}`}>
+            <div className="mb-2 flex items-center justify-between">
+              <p className={`flex items-center gap-1.5 text-[10px] uppercase tracking-[0.15em] ${themePalette.muted}`}>
+                <Terminal className="h-3 w-3" strokeWidth={2.25} />
+                System commands
+              </p>
+              {!authenticated && (
+                <span className={`inline-flex items-center gap-1 text-[10px] ${themePalette.muted}`}>
+                  <Lock className="h-3 w-3" strokeWidth={2.25} />
+                  Locked
+                </span>
+              )}
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <select
+                value={selectedCommand}
+                onChange={(event) => setSelectedCommand(event.target.value)}
+                disabled={!authenticated}
+                className={`flex-1 rounded-xl border px-3 py-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-50 ${themePalette.outline} ${theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white text-slate-900'}`}
+              >
+                {systemCommands.map((command) => (
+                  <option key={command.id} value={command.id}>
+                    {command.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleRunCommand}
+                disabled={!authenticated || commandRunning}
+                className={`flex cursor-pointer items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${tone.button}`}
+              >
+                {commandRunning && <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2.25} />}
+                Run
+              </button>
+            </div>
+            {!authenticated ? (
+              <p className={`mt-2 text-xs ${themePalette.muted}`}>Sign in from Settings to run system commands.</p>
+            ) : commandResult ? (
+              <p className={`mt-2 text-xs ${commandResult.success ? themePalette.secondary : 'text-red-400'}`}>
+                {commandResult.message || (commandResult.success ? 'Command completed.' : 'Command failed.')}
+              </p>
+            ) : null}
+          </div>
+
           <div className={`rounded-2xl border p-3 bg-[#0c1017] ${themePalette.card}`}>
+            <p className={`mb-2 text-[10px] uppercase tracking-[0.15em] ${themePalette.muted}`}>Detailed diagnostics</p>
             <div className={`max-h-[280px] overflow-y-auto rounded-xl border p-2 bg-[#0d1219] ${themePalette.surface}`}>
               <div className="space-y-2">
-                {debugEntries.map((entry, index) => (
+                {detailedDiagnostics.map((entry, index) => (
                   <div
-                    key={entry.id}
-                    className={`flex items-center justify-between gap-2 rounded-xl border-y border-r px-2.5 py-2 border-l-4 ${themePalette.outline} ${entry.value === 'Stable' ? tone.borderAccent : 'border-l-slate-500/40'} ${index % 2 === 0 ? themePalette.zebra : ''}`}
+                    key={entry.label}
+                    className={`flex items-center justify-between gap-2 rounded-xl border-y border-r px-2.5 py-2 border-l-4 ${themePalette.outline} ${entry.ok === false ? 'border-l-amber-500/60' : entry.ok === true ? tone.borderAccent : 'border-l-slate-500/40'} ${index % 2 === 0 ? themePalette.zebra : ''}`}
                   >
                     <span className={`text-sm ${themePalette.secondary}`}>{entry.label}</span>
                     <span className={`inline-flex items-center gap-1.5 text-xs ${themePalette.muted}`}>
-                      <span className={`h-1.5 w-1.5 rounded-full ${entry.value === 'Stable' ? tone.dot : 'bg-slate-500'}`} />
                       {entry.value}
+                      <span className={`h-1.5 w-1.5 rounded-full ${entry.ok === false ? 'bg-amber-500' : entry.ok === true ? tone.dot : 'bg-slate-500'}`} />
                     </span>
                   </div>
                 ))}
@@ -391,10 +835,12 @@ function App() {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setWifiOpen(true)}
-                  className={`inline-flex cursor-pointer items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition ${tone.button}`}
+                  onClick={() => authenticated && setWifiOpen(true)}
+                  disabled={!authenticated}
+                  title={authenticated ? undefined : 'Sign in from Settings to manage Wi-Fi.'}
+                  className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition ${authenticated ? `cursor-pointer ${tone.button}` : `cursor-not-allowed opacity-50 ${themePalette.chip}`}`}
                 >
-                  <Wifi className="h-3.5 w-3.5" strokeWidth={2.25} />
+                  {authenticated ? <Wifi className="h-3.5 w-3.5" strokeWidth={2.25} /> : <Lock className="h-3.5 w-3.5" strokeWidth={2.25} />}
                   Wi-Fi
                 </button>
                 <a
@@ -431,38 +877,67 @@ function App() {
             })}
           </div>
 
-          <div className={`rounded-2xl border p-3 ${themePalette.card}`}>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className={`text-[10px] uppercase ${themePalette.muted}`}>Status</p>
-                <h4 className={`text-sm font-semibold ${themePalette.text}`}>Recent activity</h4>
-              </div>
-              <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${tone.button}`}>3 updates</span>
-            </div>
-            <div className="mt-2 space-y-2">
-              {[
-                ['Camera ready', 'Module 3 is online and scanning.', activeTone.Livestream],
-                ['Translation synced', 'Output language set to English.', activeTone.Translation],
-                ['Debug healthy', 'Latency remains under 20 ms.', activeTone.Debug],
-              ].map(([title, detail, rowTone]) => (
-                <div key={title} className={`flex items-start gap-2.5 rounded-xl border p-2.5 ${themePalette.surface}`}>
-                  <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${rowTone.dot}`} />
+          {(() => {
+            const cameraRow = !cameraChecked
+              ? { title: 'Camera', detail: 'Checking for a camera…', dot: 'bg-slate-500', ok: false }
+              : !cameraAvailable
+                ? { title: 'No camera detected', detail: 'Connect a camera module to begin.', dot: 'bg-slate-500', ok: false }
+                : cameraStreaming
+                  ? { title: 'Camera ready — On', detail: 'Live feed is streaming now.', dot: activeTone.Livestream.dot, ok: true }
+                  : { title: 'Camera ready — Off', detail: 'Module is idle. Start the livestream to go live.', dot: 'bg-slate-500', ok: false }
+
+            const wifiRow = !wifiStatus.checked
+              ? { title: 'Wi-Fi', detail: 'Checking connection…', dot: 'bg-slate-500', ok: false }
+              : wifiStatus.connected
+                ? { title: 'Wi-Fi connected', detail: `Connected to "${wifiStatus.ssid}".`, dot: activeTone.Home.dot, ok: true }
+                : { title: 'Wi-Fi not connected', detail: 'No active Wi-Fi connection.', dot: 'bg-slate-500', ok: false }
+
+            const latencyRow = latencyMs === null
+              ? { title: 'Latency unknown', detail: 'Unable to reach the Pi server.', dot: 'bg-slate-500', ok: false }
+              : { title: 'Latency', detail: `${latencyMs} ms round-trip to the Pi server.`, dot: activeTone.Debug.dot, ok: true }
+
+            const statusRows = [cameraRow, wifiRow, latencyRow]
+            const nominalCount = statusRows.filter((row) => row.ok).length
+
+            return (
+              <div className={`rounded-2xl border p-3 ${themePalette.card}`}>
+                <div className="flex items-center justify-between">
                   <div>
-                    <p className={`text-sm font-medium ${themePalette.text}`}>{title}</p>
-                    <p className={`mt-0.5 text-sm ${themePalette.secondary}`}>{detail}</p>
+                    <p className={`text-[10px] uppercase ${themePalette.muted}`}>Status</p>
+                    <h4 className={`text-sm font-semibold ${themePalette.text}`}>Application status</h4>
                   </div>
+                  <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${tone.button}`}>{nominalCount}/3 nominal</span>
                 </div>
-              ))}
-            </div>
-          </div>
+                <div className="mt-2 space-y-2">
+                  {statusRows.map((row) => (
+                    <div key={row.title} className={`flex items-start gap-2.5 rounded-xl border p-2.5 ${themePalette.surface}`}>
+                      <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${row.dot}`} />
+                      <div>
+                        <p className={`text-sm font-medium ${themePalette.text}`}>{row.title}</p>
+                        <p className={`mt-0.5 text-sm ${themePalette.secondary}`}>{row.detail}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          })()}
 
           <div className={`rounded-2xl border p-3 ${themePalette.card}`}>
-            <p className={`text-[10px] uppercase ${themePalette.muted}`}>Queue</p>
+            <p className={`text-[10px] uppercase ${themePalette.muted}`}>System resources</p>
             <div className="mt-2 space-y-2">
-              {['Capture frame', 'Render preview', 'Export translation', 'Archive diagnostics'].map((item, index) => (
+              {[
+                [Clock, 'Uptime', systemStats ? formatUptime(systemStats.uptimeSeconds) : 'Unavailable'],
+                [HardDrive, 'Storage used', systemStats?.storage?.usedPercent != null ? `${systemStats.storage.usedPercent}%` : 'Unavailable'],
+                [Cpu, 'CPU temp', systemStats?.cpuTempC != null ? `${systemStats.cpuTempC}°C` : 'Unavailable'],
+                [Activity, 'Memory free', systemStats ? formatBytes(systemStats.memory.freeBytes) : 'Unavailable'],
+              ].map(([RowIcon, item, value], index) => (
                 <div key={item} className={`flex items-center justify-between rounded-xl border px-2.5 py-2 ${themePalette.surface} ${index % 2 === 0 ? themePalette.zebra : ''}`}>
-                  <span className={`text-sm ${themePalette.secondary}`}>{item}</span>
-                  <span className={`text-xs ${themePalette.muted}`}>Queued</span>
+                  <span className={`flex items-center gap-1.5 text-sm ${themePalette.secondary}`}>
+                    <RowIcon className="h-3.5 w-3.5" strokeWidth={2.25} />
+                    {item}
+                  </span>
+                  <span className={`text-xs ${themePalette.muted}`}>{value}</span>
                 </div>
               ))}
             </div>
@@ -555,6 +1030,63 @@ function App() {
                     className="w-full cursor-pointer"
                     style={{ accentColor: tone.hex }}
                   />
+                </div>
+
+                <div className={`border-t pt-3 ${themePalette.border}`}>
+                  <div className="mb-2 flex items-center justify-between">
+                    <p className={`flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide ${themePalette.muted}`}>
+                      <KeyRound className="h-3.5 w-3.5" strokeWidth={2.25} />
+                      Admin sign-in
+                    </p>
+                    {authenticated && (
+                      <span className={`inline-flex items-center gap-1 text-[10px] font-medium ${themePalette.accent}`}>
+                        <ShieldCheck className="h-3 w-3" strokeWidth={2.25} />
+                        Signed in
+                      </span>
+                    )}
+                  </div>
+
+                  {authenticated ? (
+                    <div className={`rounded-xl border p-2.5 ${themePalette.surface}`}>
+                      <p className={`text-sm ${themePalette.text}`}>Signed in as {ADMIN_USERNAME}</p>
+                      <p className={`mt-0.5 text-xs ${themePalette.muted}`}>Wi-Fi and system commands are unlocked.</p>
+                      <button
+                        type="button"
+                        onClick={handleLogout}
+                        className={`mt-2 flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition ${themePalette.chip}`}
+                      >
+                        <LogOut className="h-3.5 w-3.5" strokeWidth={2.25} />
+                        Sign out
+                      </button>
+                    </div>
+                  ) : (
+                    <form className="space-y-2" onSubmit={handleLogin}>
+                      <input
+                        type="text"
+                        value={authUsername}
+                        onChange={(event) => setAuthUsername(event.target.value)}
+                        placeholder="Username"
+                        autoComplete="off"
+                        className={`w-full rounded-xl border px-3 py-2 text-sm outline-none ${themePalette.outline} ${theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white text-slate-900'}`}
+                      />
+                      <input
+                        type="password"
+                        value={authPassword}
+                        onChange={(event) => setAuthPassword(event.target.value)}
+                        placeholder="Password"
+                        autoComplete="off"
+                        className={`w-full rounded-xl border px-3 py-2 text-sm outline-none ${themePalette.outline} ${theme === 'dark' ? 'bg-slate-900 text-white' : 'bg-white text-slate-900'}`}
+                      />
+                      {authError && <p className="text-xs text-red-400">{authError}</p>}
+                      <button
+                        type="submit"
+                        className={`flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition ${tone.button}`}
+                      >
+                        <LogIn className="h-3.5 w-3.5" strokeWidth={2.25} />
+                        Sign in
+                      </button>
+                    </form>
+                  )}
                 </div>
               </div>
             </div>

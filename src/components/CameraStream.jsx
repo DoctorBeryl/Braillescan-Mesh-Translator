@@ -1,48 +1,30 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { Camera } from 'lucide-react'
 
-const STATUS_URL = '/api/camera/status'
 const STREAM_URL = '/api/camera/stream'
 
-function CameraStream({ tone, themePalette }) {
-  const [checked, setChecked] = useState(false)
-  const [available, setAvailable] = useState(false)
+function CameraStream({ tone, themePalette, checked, available, onStreamingChange }) {
   const [streaming, setStreaming] = useState(false)
   const [streamError, setStreamError] = useState('')
   const [streamKey, setStreamKey] = useState(0)
 
-  useEffect(() => {
-    let cancelled = false
-
-    fetch(STATUS_URL)
-      .then((response) => response.json())
-      .then((data) => {
-        if (cancelled) return
-        setAvailable(Boolean(data.available))
-        setChecked(true)
-      })
-      .catch(() => {
-        if (cancelled) return
-        setAvailable(false)
-        setChecked(true)
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [])
+  const setStreamingState = (value) => {
+    setStreaming(value)
+    onStreamingChange?.(value)
+  }
 
   const toggleStream = () => {
     if (streaming) {
-      setStreaming(false)
+      setStreamingState(false)
       return
     }
     setStreamError('')
     setStreamKey((value) => value + 1)
-    setStreaming(true)
+    setStreamingState(true)
   }
 
   const handleStreamError = () => {
-    setStreaming(false)
+    setStreamingState(false)
     setStreamError('Lost connection to the camera stream.')
   }
 
@@ -51,7 +33,7 @@ function CameraStream({ tone, themePalette }) {
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className={`flex h-9 w-9 items-center justify-center rounded-xl ${tone.button}`}>
-            <span className="text-xs font-semibold">3</span>
+            <Camera className="h-4.5 w-4.5" strokeWidth={2.25} />
           </div>
           <div>
             <p className={`text-[10px] uppercase ${themePalette.muted}`}>Camera</p>

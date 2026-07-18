@@ -71,12 +71,12 @@ Pornire mod dezvoltare:
   npm run dev
 
 Accesare browser:
-  http://raspberrypi.local:5173
+  http://192.168.100.184:3000
 
 Pornire mod producție:
   npm run build
   npm run server
-  # Accesare: http://raspberrypi.local:3001
+  # Accesare: http://192.168.100.184:3001
 
 ================================================================================
 6. SETUP SERVICIU SYSTEMD (Auto-start la Boot)

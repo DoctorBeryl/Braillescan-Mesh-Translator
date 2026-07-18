@@ -15,12 +15,13 @@
 
 ---
 
-## Comenzi Rapide
+## Comenzi Rapide - Setup Website
 
 ```bash
 git clone https://github.com/DoctorBeryl/Braillescan-Mesh-Translator.git
 cd Braillescan-Mesh-Translator
 npm install
+npm install concurrent --save-dev
 npm run dev
 ```
 

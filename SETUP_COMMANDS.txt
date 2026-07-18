@@ -1,0 +1,570 @@
+================================================================================
+         BRAILLESCAN MESH TRANSLATOR - SETUP & REFERENCE COMMANDS
+================================================================================
+
+This file contains all commands needed to set up and run the BrailleScan
+Mesh Translator application on a Raspberry Pi and development machine.
+
+Table of Contents:
+  1. Development Setup (on your local machine)
+  2. Raspberry Pi OS Installation & Configuration
+  3. Initial System Setup
+  4. Application Setup on Raspberry Pi
+  5. Running the Application
+  6. Systemd Service Setup (Auto-start)
+  7. Hardware Testing & Verification
+  8. Network Configuration
+  9. Troubleshooting Commands
+  10. Maintenance & Updates
+
+================================================================================
+1. DEVELOPMENT SETUP (Local Machine)
+================================================================================
+
+Clone the repository:
+  git clone https://github.com/DoctorBeryl/Braillescan-Mesh-Translator.git
+  cd Braillescan-Mesh-Translator
+
+Install dependencies:
+  npm install
+
+Start development server (runs frontend + backend):
+  npm run dev
+
+Build for production:
+  npm build
+
+Preview production build:
+  npm run preview
+
+Run linter on code:
+  npm run lint
+
+Start only backend server:
+  npm run server
+
+================================================================================
+2. RASPBERRY PI OS INSTALLATION & CONFIGURATION
+================================================================================
+
+Step 1: Download and Flash OS
+------------------------------
+On your computer:
+  1. Download Raspberry Pi Imager from https://www.raspberrypi.com/software/
+  2. Launch Raspberry Pi Imager
+  3. Select "Raspberry Pi Device" → Raspberry Pi 3 A+ (or your model)
+  4. Select "Operating System" → Raspberry Pi OS (64-bit) Bookworm
+  5. Select "Storage" → Your microSD card
+  6. Click "Next" and use "Edit Settings" to:
+     - Set hostname (e.g., "braillescan")
+     - Enable SSH with password authentication
+     - Set username/password (default: pi/raspberry)
+     - Configure Wi-Fi if desired
+  7. Write the image
+
+Step 2: Boot and Connect
+------------------------
+On Raspberry Pi:
+  1. Insert flashed microSD card
+  2. Connect camera, display, sensors
+  3. Connect power supply
+  4. Wait for boot (2-3 minutes)
+  5. Connect via SSH: ssh pi@braillescan.local
+     (or ssh pi@<IP_ADDRESS>)
+
+Troubleshooting: If SSH doesn't work, try finding IP with:
+  sudo arp-scan --localnet
+
+================================================================================
+3. INITIAL SYSTEM SETUP
+================================================================================
+
+Connect via SSH:
+  ssh pi@raspberrypi.local
+
+Update all packages:
+  sudo apt update
+  sudo apt upgrade -y
+  sudo apt autoremove -y
+
+Enable required interfaces:
+  sudo raspi-config
+  # Navigate to: Interfacing Options
+  # Enable: Camera, I2C, SPI, SSH
+  # Then reboot: sudo reboot
+
+Wait for reboot and reconnect:
+  ssh pi@raspberrypi.local
+
+Install system dependencies:
+  sudo apt install -y \
+    git \
+    curl \
+    build-essential \
+    python3-dev \
+    python3-pip \
+    libcamera-apps \
+    libraspberrypi-bin \
+    i2c-tools \
+    v4l-utils
+
+Install Node.js LTS (version 20):
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+  sudo apt install -y nodejs npm
+
+Verify installations:
+  node --version        # Should show v20.x.x
+  npm --version         # Should show 10.x.x
+  libcamera-hello       # Should show help
+  i2cdetect -y 1        # Should show I2C devices (if connected)
+
+================================================================================
+4. APPLICATION SETUP ON RASPBERRY PI
+================================================================================
+
+Create application directory (or use existing):
+  mkdir -p ~/projects
+  cd ~/projects
+
+Clone the repository:
+  git clone https://github.com/DoctorBeryl/Braillescan-Mesh-Translator.git
+  cd Braillescan-Mesh-Translator
+
+Install Node.js dependencies:
+  npm install
+
+(This may take 3-5 minutes on Pi 3 A+)
+
+Verify installation:
+  npm list          # Should show all dependencies installed
+
+================================================================================
+5. RUNNING THE APPLICATION
+================================================================================
+
+Development Mode (with hot reload):
+  cd ~/Braillescan-Mesh-Translator
+  npm run dev
+
+The application will:
+  - Start frontend dev server on port 5173 (or next available)
+  - Start backend on port 3001
+  - Show URLs to access the application
+
+Access the application:
+  From Raspberry Pi browser: http://localhost:5173
+  From another computer:     http://raspberrypi.local:5173
+                             (or http://<PI_IP>:5173)
+
+Production Build Mode:
+  1. Build: npm run build
+  2. Start: npm run server
+  3. Access: http://raspberrypi.local:3001
+
+Stop the application:
+  Press Ctrl+C in terminal
+
+================================================================================
+6. SYSTEMD SERVICE SETUP (Auto-start at Boot)
+================================================================================
+
+Create service file:
+  sudo nano /etc/systemd/system/braillescan.service
+
+Paste the following content:
+
+---BEGIN FILE---
+[Unit]
+Description=BrailleScan Mesh Translator
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/Braillescan-Mesh-Translator
+ExecStart=/usr/bin/npm run dev
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+---END FILE---
+
+Save and exit (Ctrl+X, then Y, then Enter)
+
+Enable and start the service:
+  sudo systemctl daemon-reload
+  sudo systemctl enable braillescan.service
+  sudo systemctl start braillescan.service
+
+Check service status:
+  sudo systemctl status braillescan.service
+
+View service logs (real-time):
+  sudo journalctl -u braillescan.service -f
+
+View service logs (last 50 lines):
+  sudo journalctl -u braillescan.service -n 50
+
+Stop the service:
+  sudo systemctl stop braillescan.service
+
+Restart the service:
+  sudo systemctl restart braillescan.service
+
+================================================================================
+7. HARDWARE TESTING & VERIFICATION
+================================================================================
+
+Test Camera:
+  List available cameras:
+    libcamera-hello --list-cameras
+
+  Capture a test image:
+    libcamera-jpeg -o ~/test.jpg
+
+  Stream camera (30 seconds):
+    rpicam-vid -t 30000 -o ~/test.h264
+
+  Get camera information:
+    libcamera-hello --list-cameras --verbose
+
+Test I2C Devices:
+  Scan I2C bus 1:
+    i2cdetect -y 1
+
+  Check specific device at address (example: 0x29):
+    i2cget -y 1 0x29
+
+  List all I2C buses:
+    i2cdetect -l
+
+Test SPI:
+  Check if SPI is loaded:
+    lsmod | grep spi
+
+Test Display Connection:
+  If using I2C LCD display:
+    i2cdetect -y 1
+    (Your display address should appear in the list)
+
+Check CPU Temperature:
+  vcgencmd measure_temp
+
+Check if CPU is Throttled:
+  vcgencmd get_throttled
+  (Non-zero value = throttling active)
+
+Check System Stats:
+  Real-time monitoring:
+    htop
+
+  Memory usage:
+    free -h
+
+  Disk usage:
+    df -h
+
+  CPU load average:
+    cat /proc/loadavg
+
+================================================================================
+8. NETWORK CONFIGURATION
+================================================================================
+
+List available Wi-Fi networks:
+  nmcli dev wifi list
+
+Connect to Wi-Fi:
+  nmcli dev wifi connect "SSID" password "PASSWORD"
+
+Check current connection:
+  nmcli con show
+  nmcli device status
+
+Disconnect from Wi-Fi:
+  nmcli dev disconnect wlan1
+
+View stored connections:
+  nmcli con show
+
+Delete a connection:
+  nmcli con delete "SSID"
+
+Set static IP (optional, for reliability):
+  sudo nano /etc/dhcpcd.conf
+
+  Add at the end:
+    interface wlan1
+    static ip_address=192.168.1.100/24
+    static routers=192.168.1.1
+    static domain_name_servers=8.8.8.8
+
+  Then reboot:
+    sudo reboot
+
+Create Wi-Fi Access Point (AP Mode):
+  Install prerequisites:
+    sudo apt install -y hostapd dnsmasq
+
+  Create configuration:
+    sudo nano /etc/hostapd/hostapd.conf
+
+  Add configuration:
+    interface=wlan0
+    ssid=BrailleScan
+    wpa_passphrase=password123
+    wpa=2
+    wpa_key_mgmt=WPA-PSK
+    wpa_pairwise=CCMP
+
+  Enable and start:
+    sudo systemctl enable hostapd
+    sudo systemctl start hostapd
+    sudo systemctl enable dnsmasq
+    sudo systemctl start dnsmasq
+
+Test network connectivity:
+  Ping Google:
+    ping 8.8.8.8
+
+  Check DNS resolution:
+    nslookup google.com
+
+Check IP address:
+  ip addr show
+
+Find Raspberry Pi on network (from another computer):
+  On Linux/Mac:
+    ping raspberrypi.local
+
+  On Windows:
+    ping raspberrypi.local
+
+  Using nmap (find all devices):
+    nmap -p 22 192.168.1.0/24
+
+================================================================================
+9. TROUBLESHOOTING COMMANDS
+================================================================================
+
+Camera Issues:
+
+  Camera not detected:
+    libcamera-hello --list-cameras
+    # If no output, camera not enabled or not connected
+
+  Enable camera if not working:
+    sudo raspi-config
+    # Go to Interface Options → Camera → Enable
+
+  Test camera with verbose output:
+    rpicam-hello -v
+
+  Check camera module:
+    vcgencmd get_camera
+    # Should show supported=1 detected=1
+
+
+Application Won't Start:
+
+  Check for port conflicts (3000, 3001, 5173):
+    sudo lsof -i :3000
+    sudo lsof -i :3001
+    sudo lsof -i :5173
+
+  Kill process on port (example: port 3001):
+    sudo kill -9 $(lsof -t -i:3001)
+
+  Check Node.js installation:
+    which node
+    node --version
+
+  Verify npm modules installed:
+    ls node_modules | head -20
+
+  Clear npm cache and reinstall:
+    npm cache clean --force
+    rm -rf node_modules package-lock.json
+    npm install
+
+
+Memory Issues:
+
+  Check available memory:
+    free -h
+
+  Show memory usage per process:
+    ps aux --sort=-%mem | head -20
+
+  Check if swap is being used:
+    free -h
+    # SwapUsed > 0 means swap is active (slower)
+
+  If low memory, kill non-essential services:
+    sudo systemctl stop cups
+    sudo systemctl stop avahi-daemon
+    sudo systemctl disable cups
+    sudo systemctl disable avahi-daemon
+
+
+Disk Space Issues:
+
+  Check disk usage:
+    df -h /
+
+  Find large files:
+    du -sh ~/* | sort -rh | head -20
+
+  Remove old logs:
+    sudo journalctl --disk-usage
+    sudo journalctl --vacuum-time=3d
+
+  Clear package cache:
+    sudo apt clean
+    sudo apt autoclean
+
+  Remove development files (if needed):
+    rm -rf ~/Braillescan-Mesh-Translator/node_modules
+    npm ci  # Clean install
+
+
+Performance Issues:
+
+  Monitor CPU temperature (should stay <80°C):
+    watch -n 1 vcgencmd measure_temp
+
+  Check for thermal throttling:
+    vcgencmd get_throttled
+
+  Monitor top processes:
+    top
+
+  Enable performance governor (if available):
+    echo performance | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+
+  Check if WiFi is causing issues:
+    iwconfig
+
+SSH Connection Issues:
+
+  SSH key authentication (recommended):
+    ssh-keygen -t ed25519
+    ssh-copy-id -i ~/.ssh/id_ed25519.pub pi@raspberrypi.local
+
+  SSH with verbose output (for debugging):
+    ssh -vvv pi@raspberrypi.local
+
+  Check SSH service status:
+    sudo systemctl status ssh
+
+  Restart SSH service:
+    sudo systemctl restart ssh
+
+  Allow SSH through firewall (if using ufw):
+    sudo ufw allow 22
+
+================================================================================
+10. MAINTENANCE & UPDATES
+================================================================================
+
+Update Application:
+
+  Fetch latest changes from GitHub:
+    cd ~/Braillescan-Mesh-Translator
+    git fetch origin
+
+  See what changed:
+    git log --oneline origin/main ^HEAD
+
+  Pull latest code:
+    git pull origin main
+
+  Update dependencies (if changed):
+    npm install
+
+  Restart application:
+    sudo systemctl restart braillescan.service
+
+  Verify update:
+    git log -1 --oneline
+
+
+Update System Packages:
+
+  Update package list:
+    sudo apt update
+
+  Upgrade packages:
+    sudo apt upgrade -y
+
+  Remove old packages:
+    sudo apt autoremove -y
+
+  Fix broken dependencies:
+    sudo apt --fix-broken install
+
+  Full system upgrade (less common):
+    sudo apt full-upgrade -y
+
+
+Backup Important Files:
+
+  Backup application:
+    tar -czf ~/braillescan-backup.tar.gz ~/Braillescan-Mesh-Translator
+
+  Backup entire SD card (on another computer):
+    sudo dd if=/dev/sdX of=./braillescan-backup.img bs=4M
+    sudo fdisk -l  # Find correct device path
+
+  Copy files from Pi to local computer:
+    scp -r pi@raspberrypi.local:~/Braillescan-Mesh-Translator .
+
+
+Clean Up:
+
+  Remove old git history (careful!):
+    cd ~/Braillescan-Mesh-Translator
+    git gc --aggressive
+
+  Clear npm cache:
+    npm cache clean --force
+
+  Remove build artifacts:
+    rm -rf dist/
+
+  Clean temporary files:
+    rm -rf /tmp/*
+    sudo rm -rf /var/tmp/*
+
+
+View System Logs:
+
+  Last boot log:
+    sudo journalctl -b
+
+  Last 100 kernel messages:
+    dmesg | tail -100
+
+  All logs since last boot:
+    sudo journalctl -b
+
+  Logs from specific time:
+    sudo journalctl --since "2 hours ago"
+
+  Real-time log monitoring:
+    sudo tail -f /var/log/syslog
+
+================================================================================
+
+For more detailed information, see:
+  - README.md (comprehensive documentation)
+  - GitHub Repository: https://github.com/DoctorBeryl/Braillescan-Mesh-Translator
+  - Official Docs: https://www.raspberrypi.com/documentation/
+
+Last Updated: July 2026
+================================================================================

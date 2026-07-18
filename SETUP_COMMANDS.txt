@@ -31,7 +31,7 @@ Build producție:
 ================================================================================
 
 1. Descărcați Raspberry Pi Imager: https://www.raspberrypi.com/software/
-2. Selectați: Raspberry Pi OS Bookworm 64-bit
+2. Selectați: Raspberry Pi OS Lite 64-bit
 3. Flash pe card microSD
 4. Boot și conectare SSH: ssh pi@raspberrypi.local
 
@@ -71,12 +71,12 @@ Pornire mod dezvoltare:
   npm run dev
 
 Accesare browser:
-  http://raspberrypi.local:5173
+  http://192.168.100.184:3000
 
 Pornire mod producție:
   npm run build
   npm run server
-  # Accesare: http://raspberrypi.local:3001
+  # Accesare: http://raspberrypi.local:3000
 
 ================================================================================
 6. SETUP SERVICIU SYSTEMD (Auto-start la Boot)

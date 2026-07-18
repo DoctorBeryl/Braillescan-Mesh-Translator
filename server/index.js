@@ -371,8 +371,8 @@ app.get('/api/system/stats', async (_req, res) => {
 })
 
 const SYSTEM_COMMANDS = {
-  reboot: { label: 'Reboot device', cmd: 'reboot', args: [] },
-  poweroff: { label: 'Power off device', cmd: 'poweroff', args: [] },
+  reboot: { label: 'Reboot device', cmd: 'sudo', args: ['-n', 'reboot'] },
+  poweroff: { label: 'Power off device', cmd: 'sudo', args: ['-n', 'poweroff'] },
   'restart-network': { label: 'Restart Wi-Fi interface', cmd: 'nmcli', args: ['device', 'reconnect', WIFI_IFACE] },
   'disk-usage': { label: 'Check disk usage', cmd: 'df', args: ['-h'] },
 }

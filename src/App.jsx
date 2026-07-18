@@ -462,65 +462,63 @@ function App() {
     }
   }
 
-  const renderTabContent = () => {
-    if (activeTab === 'Livestream') {
-      return (
-        <div className="grid gap-3 lg:grid-cols-[1.25fr_0.75fr]">
-          <CameraStream
-            tone={tone}
-            themePalette={themePalette}
-            checked={cameraChecked}
-            available={cameraAvailable}
-            onStreamingChange={setCameraStreaming}
-          />
+  const livestreamContent = (
+    <div className="grid gap-3 lg:grid-cols-[1.25fr_0.75fr]">
+      <CameraStream
+        tone={tone}
+        themePalette={themePalette}
+        checked={cameraChecked}
+        available={cameraAvailable}
+        onStreamingChange={setCameraStreaming}
+      />
 
-          <div className={`space-y-2 rounded-2xl border p-3 ${themePalette.card}`}>
-            <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <div className="flex items-center justify-between">
-                <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>
-                  <ImageIcon className="h-3 w-3" strokeWidth={2.25} />
-                  Stored images
-                </p>
-              </div>
-              <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{storedImages.toLocaleString()}</p>
-            </div>
-            <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <div className="mb-1 flex items-center justify-between text-[10px] uppercase">
-                <p className={`flex items-center gap-1.5 ${themePalette.muted}`}>
-                  <Gauge className="h-3 w-3" strokeWidth={2.25} />
-                  Sharpness
-                </p>
-                <span className={themePalette.text}>{cameraStreaming ? `${sharpness}%` : '—'}</span>
-              </div>
-              <div className={`h-2 rounded-full ${tone.strong}`}>
-                <div className={`h-2 rounded-full ${tone.dot} transition-all`} style={{ width: `${cameraStreaming ? sharpness : 0}%` }} />
-              </div>
-            </div>
-            <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>
-                <Crosshair className="h-3 w-3" strokeWidth={2.25} />
-                Distance to surface
-              </p>
-              <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{cameraStreaming ? `${distanceToSurface} cm` : '— cm'}</p>
-            </div>
-            <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>
-                <Focus className="h-3 w-3" strokeWidth={2.25} />
-                Ideal focal distance
-              </p>
-              <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{idealFocalDistanceCm} cm</p>
-            </div>
-            <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
-              <p className={`text-[10px] uppercase ${themePalette.muted}`}>Session</p>
-              <p className={`mt-1 text-sm ${themePalette.secondary}`}>
-                {cameraStreaming ? 'Streaming session is active right now.' : 'No active streaming session.'}
-              </p>
-            </div>
+      <div className={`space-y-2 rounded-2xl border p-3 ${themePalette.card}`}>
+        <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
+          <div className="flex items-center justify-between">
+            <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>
+              <ImageIcon className="h-3 w-3" strokeWidth={2.25} />
+              Stored images
+            </p>
+          </div>
+          <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{storedImages.toLocaleString()}</p>
+        </div>
+        <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
+          <div className="mb-1 flex items-center justify-between text-[10px] uppercase">
+            <p className={`flex items-center gap-1.5 ${themePalette.muted}`}>
+              <Gauge className="h-3 w-3" strokeWidth={2.25} />
+              Sharpness
+            </p>
+            <span className={themePalette.text}>{cameraStreaming ? `${sharpness}%` : '—'}</span>
+          </div>
+          <div className={`h-2 rounded-full ${tone.strong}`}>
+            <div className={`h-2 rounded-full ${tone.dot} transition-all`} style={{ width: `${cameraStreaming ? sharpness : 0}%` }} />
           </div>
         </div>
-      )
-    }
+        <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
+          <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>
+            <Crosshair className="h-3 w-3" strokeWidth={2.25} />
+            Distance to surface
+          </p>
+          <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{cameraStreaming ? `${distanceToSurface} cm` : '— cm'}</p>
+        </div>
+        <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
+          <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>
+            <Focus className="h-3 w-3" strokeWidth={2.25} />
+            Ideal focal distance
+          </p>
+          <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{idealFocalDistanceCm} cm</p>
+        </div>
+        <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
+          <p className={`text-[10px] uppercase ${themePalette.muted}`}>Session</p>
+          <p className={`mt-1 text-sm ${themePalette.secondary}`}>
+            {cameraStreaming ? 'Streaming session is active right now.' : 'No active streaming session.'}
+          </p>
+        </div>
+      </div>
+    </div>
+  )
 
+  const renderTabContent = () => {
     if (activeTab === '3D View') {
       return (
         <div className="grid gap-3 lg:grid-cols-[1.1fr_0.9fr]">
@@ -844,7 +842,7 @@ function App() {
                   Wi-Fi
                 </button>
                 <a
-                  href="https://github.com/"
+                  href="https://github.com/DoctorBeryl/Braillescan-Mesh-Translator"
                   target="_blank"
                   rel="noreferrer"
                   className={`inline-flex cursor-pointer items-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition ${tone.button}`}
@@ -1110,7 +1108,10 @@ function App() {
           })}
         </nav>
 
-        <main>{renderTabContent()}</main>
+        <main>
+          <div className={activeTab === 'Livestream' ? undefined : 'hidden'}>{livestreamContent}</div>
+          {activeTab !== 'Livestream' && renderTabContent()}
+        </main>
       </div>
 
       <WifiPanel

@@ -4,9 +4,7 @@
 
 ---
 
-## DOCUMENTAȚIE - GHID DE PORNIRE RAPIDĂ
-
-### CITIȚI MAI ÎNTÂI - Documentele esențiale:
+### Documentele esențiale:
 
 | Document | Descriere | Link |
 |----------|-----------|------|
@@ -26,9 +24,9 @@ npm install
 npm run dev
 ```
 
-Accesare: http://raspberrypi.local:5173
+Accesare: http://192.168.100.184:3000
 
-**Pentru instalare completă, vezi:** [SETUP_COMMANDS.txt](./SETUP_COMMANDS.txt)
+**Instalare completă:** [SETUP_COMMANDS.txt](./SETUP_COMMANDS.txt)
 
 ---
 
@@ -86,8 +84,6 @@ Accesare: http://raspberrypi.local:5173
 - [Justificare Tehnologii](#justificarea-folosirii-tehnologiilor-alese)
 - [Opinia Autorilor](#opinia-autorilor-despre-proiect)
 - [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [Licență](#licență)
 
 ---
 
@@ -228,26 +224,6 @@ Pentru etapele ulterioare ale dezvoltării propunem:
 - Îmbunătățirea autonomiei și optimizarea designului cadrului printat 3D
 - Integrarea sistemelor de inteligență artificială pentru optimizarea recunoașterii
 - Implementarea unui sistem autofocus pentru cameră
-
----
-
-## Contributing
-
-Contribuțiile sunt binevenite!
-
-1. Fork repository-ul
-2. Creați branch pentru feature
-3. Commit-ați schimbări
-4. Push-ați la branch
-5. Deschideți Pull Request
-
----
-
-## Licență
-
-Acest proiect este licențiat sub MIT License — vezi fișierul [LICENSE](LICENSE).
-
----
 
 **Repository:** https://github.com/DoctorBeryl/Braillescan-Mesh-Translator
 **Mentenanță:** [@DoctorBeryl](https://github.com/DoctorBeryl)

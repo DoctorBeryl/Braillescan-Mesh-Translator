@@ -3,9 +3,19 @@ import { execFile, spawn } from 'child_process'
 import { translate } from '@vitalets/google-translate-api'
 import os from 'node:os'
 import fs from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const WIFI_IFACE = 'wlan1'
 const PORT = process.env.WIFI_SERVER_PORT || 3001
+
+// Resolved from this file's location (not process.cwd()) so it's stable
+// regardless of which directory `npm run dev`/`npm run server` is launched from.
+const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url))
+const IMAGES_DIR = path.join(SERVER_DIR, '..', 'raspimages')
+const IMAGE_SAVE_INTERVAL_MS = 1000
+
+await fs.mkdir(IMAGES_DIR, { recursive: true })
 
 // Raspberry Pi OS renamed libcamera-apps to rpicam-apps in late 2023;
 // try the modern binaries first and fall back for older installs.
@@ -241,6 +251,7 @@ app.get('/api/camera/stream', async (req, res) => {
   })
 
   let buffer = Buffer.alloc(0)
+  let lastImageSavedAt = 0
 
   child.stdout.on('data', (chunk) => {
     buffer = Buffer.concat([buffer, chunk])
@@ -268,11 +279,49 @@ app.get('/api/camera/stream', async (req, res) => {
         cameraStats.frameTimestamps.shift()
       }
 
+      // Persist a still every IMAGE_SAVE_INTERVAL_MS so a scan pass builds up
+      // a manageable set of frames in ./raspimages instead of flooding disk
+      // at the full stream framerate.
+      if (now - lastImageSavedAt >= IMAGE_SAVE_INTERVAL_MS) {
+        lastImageSavedAt = now
+        const filename = `img-${now}.jpg`
+        fs.writeFile(path.join(IMAGES_DIR, filename), frame).catch(() => {})
+      }
+
       res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\n\r\n`)
       res.write(frame)
       res.write('\r\n')
     }
   })
+})
+
+async function listSavedImages() {
+  let entries
+  try {
+    entries = await fs.readdir(IMAGES_DIR, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.jpg'))
+    .map((entry) => entry.name)
+    .sort()
+}
+
+app.get('/api/images/count', async (_req, res) => {
+  const names = await listSavedImages()
+  res.json({ count: names.length })
+})
+
+// Reads every saved still from ./raspimages and sends it to the client in
+// one response, ahead of the (placeholder) 3D reconstruction step.
+app.get('/api/images', async (_req, res) => {
+  const names = await listSavedImages()
+  const images = await Promise.all(names.map(async (name) => {
+    const data = await fs.readFile(path.join(IMAGES_DIR, name))
+    return { name, data: data.toString('base64') }
+  }))
+  res.json({ count: images.length, images })
 })
 
 app.get('/api/camera/stats', (_req, res) => {
@@ -395,7 +444,12 @@ app.post('/api/system/command', async (req, res) => {
     const stdout = await run(entry.cmd, entry.args)
     res.json({ success: true, output: stdout.trim() })
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message })
+    // `sudo -n` refuses to prompt for a password; on a Pi without the
+    // NOPASSWD rule from SETUP_COMMANDS.txt this is the failure every time.
+    const message = /password is required|no tty present/i.test(err.message)
+      ? `${err.message} — passwordless sudo isn't configured for this command. See "PERMISIUNI ADMIN" in SETUP_COMMANDS.txt.`
+      : err.message
+    res.status(500).json({ success: false, message })
   }
 })
 

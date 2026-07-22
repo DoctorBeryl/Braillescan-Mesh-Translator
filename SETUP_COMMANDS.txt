@@ -72,7 +72,7 @@ Pornire mod dezvoltare:
 
 Accesare browser:
   http://192.168.100.184:3000
-
+  
 ================================================================================
 6. SETUP SERVICIU SYSTEMD (Auto-start la Boot)
 ================================================================================
@@ -108,6 +108,34 @@ Comenzi serviciu:
   sudo systemctl status braillescan.service   # Status
   sudo systemctl restart braillescan.service  # Restart
   sudo journalctl -u braillescan.service -f   # Logs
+
+================================================================================
+7. PERMISIUNI ADMIN (Reboot / Poweroff din interfața web)
+================================================================================
+
+Meniul Admin din aplicație rulează "sudo -n reboot" și "sudo -n poweroff".
+Flag-ul -n interzice sudo să ceară parola interactiv (procesul Node nu are
+un terminal atașat), deci dacă utilizatorul "pi" nu are sudo fără parolă
+configurat pentru aceste două comenzi, ele eșuează imediat cu eroarea
+"sudo: a password is required" — acesta este motivul cel mai probabil
+pentru care meniul Admin nu funcționează.
+
+Aflați calea reală a binarelor (poate diferi de exemplul de mai jos):
+  which reboot poweroff
+
+Adăugați o regulă NOPASSWD doar pentru aceste comenzi (recomandat, nu
+pentru tot sudo):
+  sudo visudo -f /etc/sudoers.d/braillescan-admin
+
+Introduceți (ajustați căile dacă "which" a arătat altceva):
+  pi ALL=(ALL) NOPASSWD: /usr/sbin/reboot, /usr/sbin/poweroff
+
+Salvare (Ctrl+X, Y, Enter) — visudo validează sintaxa automat înainte de
+a scrie fișierul, deci o greșeală de sintaxă nu vă poate bloca sudo-ul.
+
+Verificare (fără să reporniți efectiv dispozitivul):
+  sudo -n -l
+  # Comenzile "reboot" și "poweroff" trebuie să apară cu (NOPASSWD)
 
 ================================================================================
 COMENZI RAPIDE

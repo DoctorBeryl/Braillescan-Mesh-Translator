@@ -80,7 +80,7 @@ function App() {
   const [cameraStreaming, setCameraStreaming] = useState(false)
   const [wifiStatus, setWifiStatus] = useState({ checked: false, connected: false, ssid: null, signal: null })
   const [latencyMs, setLatencyMs] = useState(null)
-  const [storedImages, setStoredImages] = useState(486)
+  const [storedImages, setStoredImages] = useState(0)
   const [sharpness, setSharpness] = useState(88)
   const [distanceToSurface, setDistanceToSurface] = useState(45)
   const [systemStats, setSystemStats] = useState(null)
@@ -95,6 +95,9 @@ function App() {
   const [commandResult, setCommandResult] = useState(null)
   const [exporting, setExporting] = useState(false)
   const [exportError, setExportError] = useState('')
+  const [compiling, setCompiling] = useState(false)
+  const [compileError, setCompileError] = useState('')
+  const [imagesPopup, setImagesPopup] = useState(null)
   const settingsRef = useRef(null)
   const modelViewerRef = useRef(null)
 
@@ -264,7 +267,6 @@ function App() {
   useEffect(() => {
     if (!cameraStreaming) return
     const interval = setInterval(() => {
-      setStoredImages((value) => value + 1)
       setSharpness((value) => {
         const next = value + (Math.random() * 6 - 3)
         return Math.max(58, Math.min(97, Math.round(next)))
@@ -276,6 +278,26 @@ function App() {
     }, 3000)
     return () => clearInterval(interval)
   }, [cameraStreaming])
+
+  useEffect(() => {
+    let cancelled = false
+    const poll = () => {
+      fetch('/api/images/count')
+        .then((response) => response.json())
+        .then((data) => {
+          if (!cancelled) setStoredImages(data.count ?? 0)
+        })
+        .catch(() => {
+          if (!cancelled) setStoredImages(0)
+        })
+    }
+    poll()
+    const interval = setInterval(poll, 5000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [])
 
   useEffect(() => {
     const handlePointerDown = (event) => {
@@ -389,8 +411,22 @@ function App() {
       }
   const scaleStyle = { fontSize: `${textPercent}%` }
 
-  const handleCompile = () => {
-    setCompileProgress((value) => Math.min(100, value + 18))
+  const handleCompile = async () => {
+    setCompiling(true)
+    setCompileError('')
+    try {
+      const response = await fetch('/api/images')
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.message || 'Failed to collect images from the device.')
+      // Placeholder processing: the real reconstruction pipeline isn't wired
+      // up yet, so just confirm how many stills made it to the client.
+      setImagesPopup({ count: data.count ?? 0 })
+      setCompileProgress((value) => Math.min(100, value + 18))
+    } catch (err) {
+      setCompileError(err.message || 'Compile failed.')
+    } finally {
+      setCompiling(false)
+    }
   }
 
   const handleExport = async () => {
@@ -571,10 +607,13 @@ function App() {
               <button
                 type="button"
                 onClick={handleCompile}
-                className={`mt-2 w-full cursor-pointer rounded-xl border px-3 py-2 text-sm font-medium transition ${tone.button}`}
+                disabled={compiling}
+                className={`mt-2 flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${tone.button}`}
               >
-                Compile 3D model
+                {compiling && <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2.25} />}
+                {compiling ? 'Sending images…' : 'Compile 3D model'}
               </button>
+              {compileError && <p className="mt-1.5 text-xs text-red-400">{compileError}</p>}
             </div>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
               <div className="mb-2 flex items-center justify-between text-sm">
@@ -1121,6 +1160,31 @@ function App() {
         themePalette={themePalette}
         tone={tone}
       />
+
+      {imagesPopup && (
+        <div
+          className="fixed inset-0 z-30 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setImagesPopup(null)}
+        >
+          <div
+            className={`w-full max-w-sm rounded-2xl border p-4 shadow-2xl ${themePalette.surface}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <p className={`text-sm font-semibold ${themePalette.text}`}>Processing complete</p>
+              <button
+                type="button"
+                onClick={() => setImagesPopup(null)}
+                className={`inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-full transition ${themePalette.chip}`}
+                aria-label="Close"
+              >
+                <X className="h-3.5 w-3.5" strokeWidth={2.25} />
+              </button>
+            </div>
+            <p className={`mt-3 text-sm ${themePalette.secondary}`}>Images received: {imagesPopup.count}</p>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -72,12 +72,6 @@ Pornire mod dezvoltare:
 
 Accesare browser:
   http://192.168.100.184:3000
-  http://192.168.100.184:3000
-
-Pornire mod producție:
-  npm run build
-  npm run server
-  # Accesare: http://192.168.100.184:3001
 
 ================================================================================
 6. SETUP SERVICIU SYSTEMD (Auto-start la Boot)

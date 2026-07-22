@@ -88,9 +88,9 @@ Accesare: http://192.168.100.184:3000
 
 ---
 
-# BrailleScan Mesh Translator — Documentație Proiect
+# BrailleScan Mesh Translator — Documentație proiect
 
-## Descrierea Problemei pe care o Rezolvăm
+## Descrierea problemei pe care o rezolvăm
 
 Accesul persoanelor cu deficiențe de vedere la informațiile scrise
 reprezintă încă o provocare majoră. Deși sistemul Braille este
@@ -115,9 +115,9 @@ capabil să traducă atât textul Braille embosat, cât și textul tipărit
 obișnuit, utilizând tehnologii moderne de procesare a imaginilor și
 senzori dedicați.
 
-## Descrierea Soluției Propuse
+## Descrierea soluției propuse
 
-BrailleScan Mesh Translator este un aparat electronic inteligent
+BrailleScan Mesh Translator este un aparat electronic
 construit în jurul unui microcalculator Raspberry Pi. Dispozitivul
 utilizează o cameră echipată cu lentilă macro pentru captarea în detaliu
 a suprafeței hârtiei embosate și senzori care permit analizarea
@@ -140,7 +140,7 @@ portabil, fiind încadrat într-un cadru printat 3D, ceea ce îi permite
 utilizarea în contexte diverse. Acesta nu depinde permanent de o sursă
 fixă de curent.
 
-## Definirea Publicului Țintă
+## Definirea publicului țintă
 
 Proiectul este destinat în principal:
 
@@ -154,7 +154,7 @@ Proiectul este destinat în principal:
 De asemenea, dispozitivul poate fi utilizat în scop educațional pentru
 familiarizarea persoanelor fără deficiențe de vedere cu sistemul Braille.
 
-## Prezentarea Funcționalităților Aplicației
+## Prezentarea funcționalităților aplicației
 
 Principalele funcționalități ale sistemului sunt:
 
@@ -168,7 +168,7 @@ Principalele funcționalități ale sistemului sunt:
 - Posibilitatea conectării la Internet printr-o a doua interfață wireless
 - Administrarea și configurarea dispozitivului din interfața web
 
-## Arhitectura Aplicației
+## Arhitectura aplicației
 
 Sistemul este alcătuit din două componente principale:
 
@@ -184,7 +184,7 @@ Raspberry Pi creează o rețea Wi-Fi proprie (Access Point). Opțional, poate fo
 
 **Dispozitivul Host** - Orice calculator, tabletă sau telefon mobil cu browser web modern care comunică prin HTTP cu dispozitivul.
 
-## Elemente Distinctive ale Aplicației — Puncte Forte
+## Elemente distinctive ale aplicației — puncte forte
 
 - Captură de imagini în mod macro pentru analizarea reliefului Braille
 - Combinarea informațiilor provenite din senzori și procesarea imaginilor
@@ -195,13 +195,13 @@ Raspberry Pi creează o rețea Wi-Fi proprie (Access Point). Opțional, poate fo
 - Cost redus comparativ cu echipamentele comerciale
 - Arhitectură modulară și extensibilă
 
-## Justificarea Folosirii Tehnologiilor Alese
+## Justificarea folosirii tehnologiilor alese
 
 Platforma Raspberry Pi 3 A+ oferă un raport excelent între performanță, consum energetic și cost. Dispune de suficientă putere de procesare pentru analizarea imaginilor în timp real și permite integrarea facilă cu camere și senzori. Linux oferă stabilitate și suport extins pentru biblioteci open-source.
 
 Interfața web este independentă de sistemul de operare și poate fi accesată de pe orice dispozitiv cu browser. Camera cu lentilă macro permite captarea fidelă a reliefului Braille. Alegerea acestor tehnologii conduce la un sistem flexibil, ușor de întreținut și extensibil.
 
-## Opinia Autorilor despre Proiect
+## Opinia autorilor despre proiect
 
 Considerăm că beneficiile tehnologiei trebuie să fie disponibile unui
 număr cât mai mare de persoane. Asistența persoanelor cu dizabilități

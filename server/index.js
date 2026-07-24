@@ -19,6 +19,8 @@ const COMPILE_SCRIPT = path.join(SERVER_DIR, 'compile.py')
 const COMPILE_TIMEOUT_MS = 5 * 60 * 1000
 const DISTANCE_SCRIPT = path.join(SERVER_DIR, 'distance.py')
 const DISTANCE_TIMEOUT_MS = 2000
+const DISTANCE_EMA_WEIGHT = 0.92
+let lastDistanceOutputCm = null
 
 await fs.mkdir(IMAGES_DIR, { recursive: true })
 
@@ -408,6 +410,9 @@ app.post('/api/compile', async (_req, res) => {
 
 // Distance is read from an HC-SR04 (TRIG on board pin 29, ECHO on pin 31)
 // via a short-lived Python helper -- Node has no first-party GPIO access.
+// distance.py takes 4 readings per call (in the time one used to take) and
+// returns their average; here that average is blended with the last output
+// (92% new / 8% previous) so the UI sees a smoothed value each poll.
 app.get('/api/distance', async (_req, res) => {
   let lastErr = new Error('No Python interpreter found (tried python3, python).')
 
@@ -416,7 +421,11 @@ app.get('/api/distance', async (_req, res) => {
       const stdout = await runLong(bin, [DISTANCE_SCRIPT], DISTANCE_TIMEOUT_MS)
       const data = JSON.parse(stdout.trim())
       if (data.error) throw new Error(data.error)
-      res.json({ distanceCm: data.distanceCm })
+      const smoothedCm = lastDistanceOutputCm == null
+        ? data.distanceCm
+        : DISTANCE_EMA_WEIGHT * data.distanceCm + (1 - DISTANCE_EMA_WEIGHT) * lastDistanceOutputCm
+      lastDistanceOutputCm = smoothedCm
+      res.json({ distanceCm: Math.round(smoothedCm * 10) / 10 })
       return
     } catch (err) {
       if (err.code === 'ENOENT') {

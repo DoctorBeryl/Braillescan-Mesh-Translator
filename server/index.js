@@ -17,6 +17,8 @@ const OUTPUT_DIR = path.join(SERVER_DIR, '..', 'output')
 const IMAGE_SAVE_INTERVAL_MS = 1000
 const COMPILE_SCRIPT = path.join(SERVER_DIR, 'compile.py')
 const COMPILE_TIMEOUT_MS = 5 * 60 * 1000
+const DISTANCE_SCRIPT = path.join(SERVER_DIR, 'distance.py')
+const DISTANCE_TIMEOUT_MS = 2000
 
 await fs.mkdir(IMAGES_DIR, { recursive: true })
 
@@ -402,6 +404,31 @@ app.post('/api/compile', async (_req, res) => {
   }
 
   res.status(500).json({ success: false, message: lastErr.message })
+})
+
+// Distance is read from an HC-SR04 (TRIG on board pin 29, ECHO on pin 31)
+// via a short-lived Python helper -- Node has no first-party GPIO access.
+app.get('/api/distance', async (_req, res) => {
+  let lastErr = new Error('No Python interpreter found (tried python3, python).')
+
+  for (const bin of PYTHON_BINARIES) {
+    try {
+      const stdout = await runLong(bin, [DISTANCE_SCRIPT], DISTANCE_TIMEOUT_MS)
+      const data = JSON.parse(stdout.trim())
+      if (data.error) throw new Error(data.error)
+      res.json({ distanceCm: data.distanceCm })
+      return
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        lastErr = err
+        continue
+      }
+      res.status(500).json({ message: err.message })
+      return
+    }
+  }
+
+  res.status(500).json({ message: lastErr.message })
 })
 
 app.get('/api/camera/stats', (_req, res) => {

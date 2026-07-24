@@ -82,7 +82,7 @@ function App() {
   const [latencyMs, setLatencyMs] = useState(null)
   const [storedImages, setStoredImages] = useState(0)
   const [sharpness, setSharpness] = useState(88)
-  const [distanceToSurface, setDistanceToSurface] = useState(45)
+  const [distanceToSurface, setDistanceToSurface] = useState(null)
   const [systemStats, setSystemStats] = useState(null)
   const [cameraStats, setCameraStats] = useState(null)
   const [authenticated, setAuthenticated] = useState(false)
@@ -271,12 +271,30 @@ function App() {
         const next = value + (Math.random() * 6 - 3)
         return Math.max(58, Math.min(97, Math.round(next)))
       })
-      setDistanceToSurface((value) => {
-        const next = value + (Math.random() * 8 - 4)
-        return Math.max(15, Math.min(90, Math.round(next)))
-      })
     }, 3000)
     return () => clearInterval(interval)
+  }, [cameraStreaming])
+
+  useEffect(() => {
+    if (!cameraStreaming) return
+    let cancelled = false
+    const poll = () => {
+      fetch('/api/distance')
+        .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
+        .then(({ ok, data }) => {
+          if (cancelled) return
+          setDistanceToSurface(ok && typeof data.distanceCm === 'number' ? Math.round(data.distanceCm) : null)
+        })
+        .catch(() => {
+          if (!cancelled) setDistanceToSurface(null)
+        })
+    }
+    poll()
+    const interval = setInterval(poll, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [cameraStreaming])
 
   useEffect(() => {
@@ -540,7 +558,9 @@ function App() {
             <Crosshair className="h-3 w-3" strokeWidth={2.25} />
             Distance to surface
           </p>
-          <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>{cameraStreaming ? `${distanceToSurface} cm` : '— cm'}</p>
+          <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>
+            {!cameraStreaming ? '— cm' : distanceToSurface == null ? 'Unavailable' : `${distanceToSurface} cm`}
+          </p>
         </div>
         <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
           <p className={`flex items-center gap-1.5 text-[10px] uppercase ${themePalette.muted}`}>

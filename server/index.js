@@ -13,7 +13,10 @@ const PORT = process.env.WIFI_SERVER_PORT || 3001
 // regardless of which directory `npm run dev`/`npm run server` is launched from.
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url))
 const IMAGES_DIR = path.join(SERVER_DIR, '..', 'raspimages')
+const OUTPUT_DIR = path.join(SERVER_DIR, '..', 'output')
 const IMAGE_SAVE_INTERVAL_MS = 1000
+const COMPILE_SCRIPT = path.join(SERVER_DIR, 'compile.py')
+const COMPILE_TIMEOUT_MS = 5 * 60 * 1000
 
 await fs.mkdir(IMAGES_DIR, { recursive: true })
 
@@ -47,6 +50,34 @@ function run(cmd, args) {
         return
       }
       resolve(stdout)
+    })
+  })
+}
+
+// Like run(), but with no output-buffer limit and a much longer timeout --
+// stitching a batch of images can take far longer than the 20s budget used
+// for quick system commands, especially on Pi-class hardware.
+function runLong(cmd, args, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args)
+    let stdout = ''
+    let stderr = ''
+
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error('Process timed out.'))
+    }, timeoutMs)
+
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => { stderr += chunk })
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      reject(err)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) resolve(stdout)
+      else reject(new Error(stderr.trim() || `Process exited with code ${code}`))
     })
   })
 }
@@ -322,6 +353,55 @@ app.get('/api/images', async (_req, res) => {
     return { name, data: data.toString('base64') }
   }))
   res.json({ count: images.length, images })
+})
+
+// Raspberry Pi OS ships python3 only; some dev machines still expose plain
+// "python" for a Python 3 install, so try both rather than hardcoding one.
+const PYTHON_BINARIES = ['python3', 'python']
+
+async function listOutputImages() {
+  let entries
+  try {
+    entries = await fs.readdir(OUTPUT_DIR, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  return entries
+    .filter((entry) => entry.isFile() && /\.(jpe?g|png)$/i.test(entry.name))
+    .map((entry) => entry.name)
+    .sort()
+}
+
+// Reads every stitched piece compile.py wrote to ./output and sends it to
+// the client in one response, so the "view results" menu can render them.
+app.get('/api/output/images', async (_req, res) => {
+  const names = await listOutputImages()
+  const images = await Promise.all(names.map(async (name) => {
+    const data = await fs.readFile(path.join(OUTPUT_DIR, name))
+    return { name, data: data.toString('base64') }
+  }))
+  res.json({ count: images.length, images })
+})
+
+app.post('/api/compile', async (_req, res) => {
+  let lastErr = new Error('No Python interpreter found (tried python3, python).')
+
+  for (const bin of PYTHON_BINARIES) {
+    try {
+      const stdout = await runLong(bin, [COMPILE_SCRIPT], COMPILE_TIMEOUT_MS)
+      res.json({ success: true, output: stdout.trim() })
+      return
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        lastErr = err
+        continue
+      }
+      res.status(500).json({ success: false, message: err.message })
+      return
+    }
+  }
+
+  res.status(500).json({ success: false, message: lastErr.message })
 })
 
 app.get('/api/camera/stats', (_req, res) => {

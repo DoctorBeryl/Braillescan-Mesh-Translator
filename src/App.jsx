@@ -415,12 +415,17 @@ function App() {
     setCompiling(true)
     setCompileError('')
     try {
-      const response = await fetch('/api/images')
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.message || 'Failed to collect images from the device.')
-      // Placeholder processing: the real reconstruction pipeline isn't wired
-      // up yet, so just confirm how many stills made it to the client.
-      setImagesPopup({ count: data.count ?? 0 })
+      const compileResponse = await fetch('/api/compile', { method: 'POST' })
+      const compileData = await compileResponse.json()
+      if (!compileResponse.ok || !compileData.success) {
+        throw new Error(compileData.message || 'Compile failed.')
+      }
+
+      const imagesResponse = await fetch('/api/output/images')
+      const imagesData = await imagesResponse.json()
+      if (!imagesResponse.ok) throw new Error(imagesData.message || 'Failed to load compiled images.')
+
+      setImagesPopup({ images: imagesData.images ?? [] })
       setCompileProgress((value) => Math.min(100, value + 18))
     } catch (err) {
       setCompileError(err.message || 'Compile failed.')
@@ -1167,11 +1172,11 @@ function App() {
           onClick={() => setImagesPopup(null)}
         >
           <div
-            className={`w-full max-w-sm rounded-2xl border p-4 shadow-2xl ${themePalette.surface}`}
+            className={`w-full max-w-2xl rounded-2xl border p-4 shadow-2xl ${themePalette.surface}`}
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center justify-between">
-              <p className={`text-sm font-semibold ${themePalette.text}`}>Processing complete</p>
+              <p className={`text-sm font-semibold ${themePalette.text}`}>Compile results ({imagesPopup.images.length})</p>
               <button
                 type="button"
                 onClick={() => setImagesPopup(null)}
@@ -1181,7 +1186,27 @@ function App() {
                 <X className="h-3.5 w-3.5" strokeWidth={2.25} />
               </button>
             </div>
-            <p className={`mt-3 text-sm ${themePalette.secondary}`}>Images received: {imagesPopup.count}</p>
+            {imagesPopup.images.length === 0 ? (
+              <p className={`mt-3 text-sm ${themePalette.secondary}`}>No output images were produced.</p>
+            ) : (
+              <div className="mt-3 grid max-h-[70vh] grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3">
+                {imagesPopup.images.map((image) => (
+                  <a
+                    key={image.name}
+                    href={`data:image/jpeg;base64,${image.data}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className={`block overflow-hidden rounded-xl border ${themePalette.outline}`}
+                  >
+                    <img
+                      src={`data:image/jpeg;base64,${image.data}`}
+                      alt={image.name}
+                      className="h-28 w-full object-cover"
+                    />
+                  </a>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

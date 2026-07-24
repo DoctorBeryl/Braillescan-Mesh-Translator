@@ -283,14 +283,14 @@ function App() {
         .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
         .then(({ ok, data }) => {
           if (cancelled) return
-          setDistanceToSurface(ok && typeof data.distanceCm === 'number' ? Math.round(data.distanceCm) : null)
+          setDistanceToSurface(ok && typeof data.distanceCm === 'number' ? Math.round(data.distanceCm * 10) / 10 : null)
         })
         .catch(() => {
           if (!cancelled) setDistanceToSurface(null)
         })
     }
     poll()
-    const interval = setInterval(poll, 3000)
+    const interval = setInterval(poll, 300)
     return () => {
       cancelled = true
       clearInterval(interval)
@@ -559,7 +559,7 @@ function App() {
             Distance to surface
           </p>
           <p className={`mt-1 text-lg font-semibold ${themePalette.text}`}>
-            {!cameraStreaming ? '— cm' : distanceToSurface == null ? 'Unavailable' : `${distanceToSurface} cm`}
+            {!cameraStreaming ? '— cm' : distanceToSurface == null ? 'Unavailable' : `${distanceToSurface.toFixed(1)} cm`}
           </p>
         </div>
         <div className={`rounded-xl border p-2 ${themePalette.surface}`}>

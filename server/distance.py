@@ -16,15 +16,15 @@ SPEED_OF_SOUND_CM_S = 34300
 def measure_once():
     import RPi.GPIO as GPIO
 
+    GPIO.setwarnings(False)
     GPIO.setmode(GPIO.BOARD)
-    GPIO.setup(TRIG_PIN, GPIO.OUT)
+    GPIO.setup(TRIG_PIN, GPIO.OUT, initial=GPIO.LOW)
     GPIO.setup(ECHO_PIN, GPIO.IN)
     try:
-        GPIO.output(TRIG_PIN, False)
         time.sleep(0.05)
 
         GPIO.output(TRIG_PIN, True)
-        time.sleep(0.00001)
+        time.sleep(0.00002)
         GPIO.output(TRIG_PIN, False)
 
         start_wait = time.time()

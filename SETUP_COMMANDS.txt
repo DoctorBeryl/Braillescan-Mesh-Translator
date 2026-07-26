@@ -9,6 +9,8 @@ CUPRINS:
   4. Instalare Aplicație pe Raspberry Pi
   5. Pornire Aplicație
   6. Setup Serviciu Systemd (Auto-start)
+  7. Ecran LCD 16x2 (Instrucțiuni la Boot)
+  8. Permisiuni Admin (Reboot / Poweroff din interfața web)
 
 ================================================================================
 1. SETUP DEZVOLTARE (Calculator Local)
@@ -110,7 +112,53 @@ Comenzi serviciu:
   sudo journalctl -u braillescan.service -f   # Logs
 
 ================================================================================
-7. PERMISIUNI ADMIN (Reboot / Poweroff din interfața web)
+7. ECRAN LCD 16x2 (Instrucțiuni la Boot)
+================================================================================
+
+Afișează în buclă, imediat după boot, cei 3 pași de conectare (WLAN, adresa
+serverului, pornirea camerei) -- util fără monitor/SSH conectat.
+
+Cablaj (RW la GND, doar scriere):
+  RS -> GPIO25   E -> GPIO24
+  D4 -> GPIO23   D5 -> GPIO17   D6 -> GPIO18   D7 -> GPIO22
+  VO -> potențiometru 10k (contrast)
+
+Scriptul (server/lcd.py) folosește RPi.GPIO, deja în requirements.txt.
+
+Creare serviciu:
+  sudo nano /etc/systemd/system/braillescan-lcd.service
+
+Adăugați:
+---
+[Unit]
+Description=BrailleScan LCD Boot Instructions
+After=local-fs.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/Braillescan-Mesh-Translator/server
+ExecStart=/usr/bin/python3 lcd.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+---
+
+Salvare (Ctrl+X, Y, Enter)
+
+Activare:
+  sudo systemctl daemon-reload
+  sudo systemctl enable braillescan-lcd.service
+  sudo systemctl start braillescan-lcd.service
+
+Comenzi serviciu:
+  sudo systemctl status braillescan-lcd.service   # Status
+  sudo systemctl restart braillescan-lcd.service  # Restart
+  sudo journalctl -u braillescan-lcd.service -f   # Logs
+
+================================================================================
+8. PERMISIUNI ADMIN (Reboot / Poweroff din interfața web)
 ================================================================================
 
 Meniul Admin din aplicație rulează "sudo -n reboot" și "sudo -n poweroff".

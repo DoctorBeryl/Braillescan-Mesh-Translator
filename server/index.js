@@ -21,6 +21,8 @@ const DISTANCE_SCRIPT = path.join(SERVER_DIR, 'distance.py')
 const DISTANCE_TIMEOUT_MS = 2000
 const DISTANCE_EMA_WEIGHT = 0.92
 let lastDistanceOutputCm = null
+const SHARPNESS_SCRIPT = path.join(SERVER_DIR, 'sharpness.py')
+const SHARPNESS_TIMEOUT_MS = 3000
 
 await fs.mkdir(IMAGES_DIR, { recursive: true })
 
@@ -426,6 +428,31 @@ app.get('/api/distance', async (_req, res) => {
         : DISTANCE_EMA_WEIGHT * data.distanceCm + (1 - DISTANCE_EMA_WEIGHT) * lastDistanceOutputCm
       lastDistanceOutputCm = smoothedCm
       res.json({ distanceCm: Math.round(smoothedCm * 10) / 10 })
+      return
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        lastErr = err
+        continue
+      }
+      res.status(500).json({ message: err.message })
+      return
+    }
+  }
+
+  res.status(500).json({ message: lastErr.message })
+})
+
+// Blur detection for the most recently saved still, via the same
+// Laplacian-variance check compile.py uses.
+app.get('/api/sharpness', async (_req, res) => {
+  let lastErr = new Error('No Python interpreter found (tried python3, python).')
+
+  for (const bin of PYTHON_BINARIES) {
+    try {
+      const stdout = await runLong(bin, [SHARPNESS_SCRIPT], SHARPNESS_TIMEOUT_MS)
+      const data = JSON.parse(stdout.trim())
+      if (data.error) throw new Error(data.error)
+      res.json(data)
       return
     } catch (err) {
       if (err.code === 'ENOENT') {

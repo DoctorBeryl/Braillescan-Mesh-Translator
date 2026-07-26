@@ -112,11 +112,19 @@ Comenzi serviciu:
   sudo journalctl -u braillescan.service -f   # Logs
 
 ================================================================================
-7. ECRAN LCD 16x2 (Instrucțiuni la Boot)
+7. ECRAN LCD 16x2 (Instrucțiuni la Boot + Live Scan)
 ================================================================================
 
 Afișează în buclă, imediat după boot, cei 3 pași de conectare (WLAN, adresa
 serverului, pornirea camerei) -- util fără monitor/SSH conectat.
+
+Odată ce serverul Node raportează stream-ul camerei ca activ, ecranul trece
+automat la afișarea live: rândul 2 arată distanța curentă până la suprafață
+și diferența față de distanța focală ideală (30cm); rândul 1 rămâne gol
+decât dacă imaginea e neclară, caz în care spune "Move closer"/"Move
+farther" dacă distanța e departe de punctul focal, sau "Image blurred" dacă
+distanța e ok dar imaginea tot neclară. Dacă stream-ul se oprește, revine
+la instrucțiunile de boot.
 
 Cablaj (RW la GND, doar scriere):
   RS -> GPIO25   E -> GPIO24

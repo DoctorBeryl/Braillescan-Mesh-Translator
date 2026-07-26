@@ -7,9 +7,17 @@ Wired directly to BCM GPIO (RW tied to GND -- write-only, no read needed):
 
 Runs as its own systemd service (see SETUP_COMMANDS.txt), independent of the
 Node server -- these instructions are how the user finds that server in the
-first place, so the LCD loop can't depend on it being up.
+first place, so the boot-instructions loop can't depend on it being up.
+
+Once the camera stream is live, switches to a live scan view instead: row 2
+shows distance to the surface and its difference from the focal distance;
+row 1 shows sharpness%, replaced by a reposition/blur warning when blurry.
 """
+import json
+import os
 import time
+import urllib.error
+import urllib.request
 
 import RPi.GPIO as GPIO
 
@@ -33,6 +41,16 @@ STEPS = [
 SCROLL_STEP_S = 0.4
 SCROLL_PAUSE_S = 1.5
 STATIC_HOLD_S = 3
+
+SERVER_BASE_URL = f'http://127.0.0.1:{os.environ.get("WIFI_SERVER_PORT", "3001")}'
+HTTP_TIMEOUT_S = 1.0
+# /api/sharpness imports cv2, which is slow to start on Pi hardware.
+SHARPNESS_HTTP_TIMEOUT_S = 4.0
+SHARPNESS_POLL_INTERVAL_S = 3.0
+SCAN_POLL_INTERVAL_S = 0.5
+
+FOCAL_DISTANCE_CM = 30  # keep in sync with idealFocalDistanceCm in src/App.jsx
+FOCAL_TOLERANCE_CM = 5
 
 
 def lcd_toggle_enable():
@@ -91,12 +109,77 @@ def display_step(label, message):
     time.sleep(SCROLL_PAUSE_S)
 
 
+def fetch_json(path, timeout=HTTP_TIMEOUT_S):
+    with urllib.request.urlopen(SERVER_BASE_URL + path, timeout=timeout) as response:
+        return json.loads(response.read())
+
+
+def fetch_streaming():
+    try:
+        return bool(fetch_json('/api/camera/stats').get('streaming'))
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def fetch_distance_cm():
+    try:
+        return fetch_json('/api/distance').get('distanceCm')
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def fetch_sharpness():
+    try:
+        data = fetch_json('/api/sharpness', timeout=SHARPNESS_HTTP_TIMEOUT_S)
+        return data.get('blurry'), data.get('sharpnessPercent')
+    except (urllib.error.URLError, OSError, ValueError):
+        return None, None
+
+
+def scan_lines(distance_cm, blurry, sharpness_percent):
+    if distance_cm is None:
+        line2 = 'Distance: --'
+    else:
+        diff_cm = distance_cm - FOCAL_DISTANCE_CM
+        dist_text = f'{distance_cm:.1f}cm'
+        diff_text = f'{diff_cm:+.1f}cm'
+        line2 = dist_text.ljust(LCD_WIDTH - len(diff_text)) + diff_text
+
+    if blurry and distance_cm is not None and abs(distance_cm - FOCAL_DISTANCE_CM) > FOCAL_TOLERANCE_CM:
+        line1 = 'Move closer' if distance_cm > FOCAL_DISTANCE_CM else 'Move farther'
+    elif blurry:
+        line1 = 'Image blurred'
+    elif sharpness_percent is None:
+        line1 = 'Sharpness: --'
+    else:
+        line1 = f'Sharpness: {sharpness_percent}%'
+
+    return line1, line2
+
+
 def main():
     lcd_init()
+    last_blurry = None
+    last_sharpness_percent = None
+    next_sharpness_check = 0.0
     try:
         while True:
-            for label, message in STEPS:
-                display_step(label, message)
+            if not fetch_streaming():
+                for label, message in STEPS:
+                    display_step(label, message)
+                    if fetch_streaming():
+                        break
+                continue
+
+            now = time.monotonic()
+            if now >= next_sharpness_check:
+                last_blurry, last_sharpness_percent = fetch_sharpness()
+                next_sharpness_check = now + SHARPNESS_POLL_INTERVAL_S
+
+            line1, line2 = scan_lines(fetch_distance_cm(), last_blurry, last_sharpness_percent)
+            lcd_write_line(line1, LINE1_ADDR)
+            lcd_write_line(line2, LINE2_ADDR)
+            time.sleep(SCAN_POLL_INTERVAL_S)
     except KeyboardInterrupt:
         pass
     finally:

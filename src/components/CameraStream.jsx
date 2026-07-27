@@ -24,8 +24,26 @@ const SHARPNESS_REFERENCE_VARIANCE = SHARPNESS_THRESHOLD * 2
 // hand since there's no OpenCV in the browser.
 function laplacianVariance(data, width, height) {
   const gray = new Float32Array(width * height)
+  let min = 255
+  let max = 0
   for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
-    gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+    const g = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+    gray[p] = g
+    if (g < min) min = g
+    if (g > max) max = g
+  }
+
+  // Laplacian variance scales with contrast as well as focus, so a
+  // washed-out/flatly-lit frame (embossed dots under soft light, close in
+  // tone to the background) reads as "blurry" even in perfect focus.
+  // Stretching the sampled patch to fill the full 0-255 range before
+  // measuring edges compensates for that, so this only measures focus.
+  const range = max - min
+  if (range > 1) {
+    const scale = 255 / range
+    for (let p = 0; p < gray.length; p += 1) {
+      gray[p] = (gray[p] - min) * scale
+    }
   }
 
   let sum = 0

@@ -31,7 +31,13 @@ def clean_dir(path):
 
 
 def is_sharp(gray):
-    return cv2.Laplacian(gray, cv2.CV_64F).var() >= SHARPNESS_THRESHOLD
+    # Stretch to the full 0-255 range first -- Laplacian variance scales with
+    # contrast as well as focus, so a washed-out/flatly-lit still (embossed
+    # dots close in tone to the background) would otherwise read as blurry
+    # even in perfect focus. See src/components/CameraStream.jsx for the
+    # matching client-side normalization.
+    stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+    return cv2.Laplacian(stretched, cv2.CV_64F).var() >= SHARPNESS_THRESHOLD
 
 
 def skew_angle(gray):

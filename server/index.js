@@ -21,6 +21,13 @@ const DISTANCE_SCRIPT = path.join(SERVER_DIR, 'distance.py')
 const DISTANCE_TIMEOUT_MS = 2500
 const DISTANCE_EMA_WEIGHT = 0.92
 let lastDistanceOutputCm = null
+// Keep in sync with idealFocalDistanceCm in src/App.jsx and FOCAL_DISTANCE_CM
+// in lcd.py. This tolerance is tighter than lcd.py's FOCAL_TOLERANCE_CM (1cm,
+// just for the "move closer/farther" hint) -- a still only gets kept for the
+// scan if it's close enough to the focal plane to plausibly be in focus.
+const FOCAL_DISTANCE_CM = 4.8
+const IMAGE_SAVE_DISTANCE_TOLERANCE_CM = 1.5
+const IMAGE_SAVE_MIN_SHARPNESS_PERCENT = 55
 // Sharpness is computed client-side (browser canvas + JS, see
 // CameraStream.jsx) instead of via a server-side cv2 subprocess -- the
 // browser has CPU to spare and the Pi doesn't, which is exactly what the
@@ -361,17 +368,38 @@ app.get('/api/camera/stream', async (req, res) => {
       // one in flight) -- firing a new writeFile every second regardless of
       // whether the previous one finished let writes pile up whenever the SD
       // card fell behind, and they'd all land at once in a laggy burst.
+      //
+      // Only the write itself is throttled to that interval, not the gate
+      // check below -- distance/sharpness are just cheap reads of already-
+      // cached values, so re-checking on every incoming frame means a still
+      // gets grabbed the instant the surface comes into range instead of up
+      // to a second late.
       if (!imageSaveInFlight && now - lastImageSavedAt >= IMAGE_SAVE_INTERVAL_MS) {
-        lastImageSavedAt = now
-        imageSaveInFlight = true
-        const filename = `img-${now}.jpg`
-        fs.writeFile(path.join(IMAGES_DIR, filename), frame)
-          // Errors here used to vanish silently, so a stuck image counter
-          // gave no clue whether frames just weren't arriving or writes
-          // were actually failing (e.g. disk pressure) -- log so that
-          // distinction shows up in the service's journal.
-          .catch((err) => console.error(`Failed to save ${filename}:`, err.message))
-          .finally(() => { imageSaveInFlight = false })
+        const inFocalRange = lastDistanceOutputCm != null
+          && Math.abs(lastDistanceOutputCm - FOCAL_DISTANCE_CM) < IMAGE_SAVE_DISTANCE_TOLERANCE_CM
+        // sharpnessPercent comes from the browser's own analysis of the live
+        // frame (see CameraStream.jsx) -- the Pi doesn't re-derive it here,
+        // it just reads back whatever the receiving PC last reported. A
+        // stale report (tab closed, analysis loop stalled) is treated the
+        // same as no report, same staleness window as GET /api/sharpness.
+        const sharpnessPercent = lastSharpnessReport != null
+          && now - lastSharpnessReport.reportedAt <= SHARPNESS_REPORT_STALE_MS
+          ? lastSharpnessReport.sharpnessPercent
+          : null
+        const sharpEnough = sharpnessPercent != null && sharpnessPercent >= IMAGE_SAVE_MIN_SHARPNESS_PERCENT
+
+        if (inFocalRange && sharpEnough) {
+          lastImageSavedAt = now
+          imageSaveInFlight = true
+          const filename = `img-${now}.jpg`
+          fs.writeFile(path.join(IMAGES_DIR, filename), frame)
+            // Errors here used to vanish silently, so a stuck image counter
+            // gave no clue whether frames just weren't arriving or writes
+            // were actually failing (e.g. disk pressure) -- log so that
+            // distinction shows up in the service's journal.
+            .catch((err) => console.error(`Failed to save ${filename}:`, err.message))
+            .finally(() => { imageSaveInFlight = false })
+        }
       }
 
       res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\n\r\n`)

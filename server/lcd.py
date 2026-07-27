@@ -46,20 +46,21 @@ STATIC_HOLD_S = 3
 
 SERVER_BASE_URL = f'http://127.0.0.1:{os.environ.get("WIFI_SERVER_PORT", "3001")}'
 HTTP_TIMEOUT_S = 1.0
-# /api/distance and /api/sharpness spawn their own Python subprocess on the
-# server and can legitimately take a while, especially while the camera
-# stream is also eating CPU. These MUST stay comfortably above index.js's
-# own DISTANCE_TIMEOUT_MS / SHARPNESS_TIMEOUT_MS -- if the LCD gives up
-# first, both fields sit on "--" forever even though the server would have
-# come back with a real reading a moment later.
+# /api/distance spawns its own Python subprocess on the server and can
+# legitimately take a while, especially while the camera stream is also
+# eating CPU. This MUST stay comfortably above index.js's own
+# DISTANCE_TIMEOUT_MS -- if the LCD gives up first, the field sits on "--"
+# forever even though the server would have come back with a real reading a
+# moment later.
 DISTANCE_HTTP_TIMEOUT_S = 3.0
-# /api/sharpness imports cv2, which is slow to start on Pi hardware.
-SHARPNESS_HTTP_TIMEOUT_S = 7.0
-SHARPNESS_POLL_INTERVAL_S = 3.0
+# /api/sharpness just serves back whatever the browser last POSTed -- no
+# subprocess involved -- so this only needs to cover normal network latency.
+SHARPNESS_HTTP_TIMEOUT_S = 1.5
+SHARPNESS_POLL_INTERVAL_S = 1.0
 SCAN_POLL_INTERVAL_S = 0.5
 
-FOCAL_DISTANCE_CM = 30  # keep in sync with idealFocalDistanceCm in src/App.jsx
-FOCAL_TOLERANCE_CM = 5
+FOCAL_DISTANCE_CM = 4.8  # keep in sync with idealFocalDistanceCm in src/App.jsx
+FOCAL_TOLERANCE_CM = 1
 
 
 def lcd_toggle_enable():

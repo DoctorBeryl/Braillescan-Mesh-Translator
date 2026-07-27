@@ -21,13 +21,14 @@ const DISTANCE_SCRIPT = path.join(SERVER_DIR, 'distance.py')
 const DISTANCE_TIMEOUT_MS = 2500
 const DISTANCE_EMA_WEIGHT = 0.92
 let lastDistanceOutputCm = null
-const SHARPNESS_SCRIPT = path.join(SERVER_DIR, 'sharpness.py')
-// cv2's import alone can take several seconds on Pi-class hardware, worse
-// while the camera stream is also eating CPU -- lcd.py's own HTTP timeout
-// for this endpoint (SHARPNESS_HTTP_TIMEOUT_S) is set above this value on
-// purpose, so raising this without raising that would just move the
-// "always times out" bug from here to there.
-const SHARPNESS_TIMEOUT_MS = 6000
+// Sharpness is computed client-side (browser canvas + JS, see
+// CameraStream.jsx) instead of via a server-side cv2 subprocess -- the
+// browser has CPU to spare and the Pi doesn't, which is exactly what the
+// earlier cv2-subprocess approach kept running into. The browser POSTs its
+// reading here and lcd.py/the web UI both just read back whatever was last
+// reported.
+const SHARPNESS_REPORT_STALE_MS = 5000
+let lastSharpnessReport = null
 
 // Wipe stills left over from the previous session so a fresh boot always
 // starts a scan from an empty raspimages/ -- otherwise old frames would get
@@ -384,7 +385,12 @@ async function listSavedImages() {
   let entries
   try {
     entries = await fs.readdir(IMAGES_DIR, { withFileTypes: true })
-  } catch {
+  } catch (err) {
+    // Used to fail silently, so a stuck "0 stored images" counter gave no
+    // clue whether stills genuinely weren't being saved or this listing
+    // itself couldn't see them (wrong path, permissions, dir removed out
+    // from under it) -- log so that distinction shows up in the journal.
+    console.error('Failed to list saved images:', err.message)
     return []
   }
   return entries
@@ -479,18 +485,17 @@ async function runPythonJson(script, timeoutMs) {
   throw lastErr
 }
 
-// Both the web UI and lcd.py poll /api/distance and /api/sharpness on their
-// own timers at the same cadence, so their requests regularly land close
-// together without actually overlapping. Coalescing alone only merges calls
-// that are truly in-flight at the same instant -- two callers a few hundred
-// ms out of phase each still spawn their own subprocess. On a Pi 3 A+ (512MB
-// RAM), two independent cv2 imports (sharpness.py) or two GPIO-contending
-// distance.py runs every poll cycle is real, sustained CPU/memory pressure
-// (visible as python3 and kswapd0 usage while the camera stream is also
-// competing for the CPU), so on top of coalescing the in-flight case, cache
-// the last result for slightly under the shared poll interval -- any caller
-// within that window gets the still-fresh cached reading instead of forcing
-// a second subprocess spawn.
+// Both the web UI and lcd.py poll /api/distance on their own timers at the
+// same cadence, so their requests regularly land close together without
+// actually overlapping. Coalescing alone only merges calls that are truly
+// in-flight at the same instant -- two callers a few hundred ms out of phase
+// still spawn their own subprocess. On a Pi 3 A+ (512MB RAM), two
+// GPIO-contending distance.py runs every poll cycle is real, sustained
+// CPU/memory pressure (visible as python3 and kswapd0 usage while the camera
+// stream is also competing for the CPU), so on top of coalescing the
+// in-flight case, cache the last result for slightly under the shared poll
+// interval -- any caller within that window gets the still-fresh cached
+// reading instead of forcing a second subprocess spawn.
 function coalesce(fn, cacheTtlMs = 0) {
   let inFlight = null
   let cachedAt = 0
@@ -512,11 +517,10 @@ function coalesce(fn, cacheTtlMs = 0) {
   }
 }
 
-// Kept comfortably under each poll's own interval (500ms / 3000ms) so a
-// caller never sees a reading older than one poll cycle -- this only
-// absorbs the redundant second subprocess spawn, not the actual refresh rate.
+// Kept comfortably under the shared 500ms poll interval so a caller never
+// sees a reading older than one poll cycle -- this only absorbs the
+// redundant second subprocess spawn, not the actual refresh rate.
 const readDistance = coalesce(() => runPythonJson(DISTANCE_SCRIPT, DISTANCE_TIMEOUT_MS), 400)
-const readSharpness = coalesce(() => runPythonJson(SHARPNESS_SCRIPT, SHARPNESS_TIMEOUT_MS), 2500)
 
 // Distance is read from an HC-SR04 (TRIG on board pin 29, ECHO on pin 31)
 // via a short-lived Python helper -- Node has no first-party GPIO access.
@@ -536,15 +540,40 @@ app.get('/api/distance', async (_req, res) => {
   }
 })
 
-// Blur detection for the most recently saved still, via the same
-// Laplacian-variance check compile.py uses.
-app.get('/api/sharpness', async (_req, res) => {
-  try {
-    const data = await readSharpness()
-    res.json(data)
-  } catch (err) {
-    res.status(500).json({ message: err.message })
+function isFiniteInRange(value, min, max) {
+  return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
+}
+
+// The browser computes blur/sharpness itself (Laplacian-variance over a
+// downsampled canvas grab of the live frame, see CameraStream.jsx) and
+// reports it here once a second. This replaces spawning sharpness.py per
+// poll -- cv2's import was slow and CPU-heavy enough on Pi-class hardware
+// to compete with the camera stream for the same resources; the browser has
+// no such constraint.
+app.post('/api/sharpness', (req, res) => {
+  const { sharpness, sharpnessPercent, blurry } = req.body ?? {}
+  if (!isFiniteInRange(sharpnessPercent, 0, 100) || typeof blurry !== 'boolean') {
+    res.status(400).json({ message: 'sharpnessPercent (0-100) and blurry (boolean) are required.' })
+    return
   }
+
+  lastSharpnessReport = {
+    sharpness: typeof sharpness === 'number' && Number.isFinite(sharpness) ? sharpness : null,
+    sharpnessPercent,
+    blurry,
+    reportedAt: Date.now(),
+  }
+  res.json({ ok: true })
+})
+
+app.get('/api/sharpness', (_req, res) => {
+  if (!lastSharpnessReport || Date.now() - lastSharpnessReport.reportedAt > SHARPNESS_REPORT_STALE_MS) {
+    res.status(503).json({ message: 'No recent sharpness report from a connected browser.' })
+    return
+  }
+
+  const { sharpness, sharpnessPercent, blurry } = lastSharpnessReport
+  res.json({ sharpness, sharpnessPercent, blurry })
 })
 
 app.get('/api/camera/stats', (_req, res) => {

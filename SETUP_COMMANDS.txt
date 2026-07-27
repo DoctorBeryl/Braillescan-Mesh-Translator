@@ -120,7 +120,7 @@ serverului, pornirea camerei) -- util fără monitor/SSH conectat.
 
 Odată ce serverul Node raportează stream-ul camerei ca activ, ecranul trece
 automat la afișarea live: rândul 2 arată distanța curentă până la suprafață
-și diferența față de distanța focală ideală (30cm); rândul 1 rămâne gol
+și diferența față de distanța focală ideală (4.8cm); rândul 1 rămâne gol
 decât dacă imaginea e neclară, caz în care spune "Move closer"/"Move
 farther" dacă distanța e departe de punctul focal, sau "Image blurred" dacă
 distanța e ok dar imaginea tot neclară. Dacă stream-ul se oprește, revine

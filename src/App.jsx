@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Activity, Aperture, Box, Bug, Clock, Cpu, Crosshair, Download, ExternalLink, Focus, Gauge, HardDrive, Home as HomeIcon, Image as ImageIcon, KeyRound, Languages as LanguagesIcon, Loader2, LogIn, LogOut, Lock, Moon, Palette, Settings, ShieldCheck, Sun, Terminal, Type, Video, Wifi, X } from 'lucide-react'
 import WifiPanel from './components/WifiPanel'
 import CameraStream from './components/CameraStream'
@@ -31,7 +31,7 @@ const headerCaptions = {
   Debug: 'System diagnostics',
 }
 const translationSampleText = 'Hello, welcome to the Pi Translator.'
-const idealFocalDistanceCm = 30
+const idealFocalDistanceCm = 4.8
 const ADMIN_USERNAME = 'admin'
 const ADMIN_PASSWORD = 'password'
 const fallbackSystemCommands = [
@@ -264,35 +264,18 @@ function App() {
     }
   }, [targetLang, showTranslation])
 
-  // Sharpness is Laplacian-variance blur detection on the most recently
-  // saved still (see server/sharpness.py) -- polled at the same cadence as
-  // lcd.py's own sharpness check, since cv2's import is slow enough that
-  // polling faster just piles up overlapping requests without a fresher
-  // answer to show for it.
-  useEffect(() => {
-    if (!cameraStreaming) {
-      setSharpness(null)
-      return
-    }
-    let cancelled = false
-    const poll = () => {
-      fetch('/api/sharpness')
-        .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
-        .then(({ ok, data }) => {
-          if (cancelled) return
-          setSharpness(ok && typeof data.sharpnessPercent === 'number' ? data.sharpnessPercent : null)
-        })
-        .catch(() => {
-          if (!cancelled) setSharpness(null)
-        })
-    }
-    poll()
-    const interval = setInterval(poll, 3000)
-    return () => {
-      cancelled = true
-      clearInterval(interval)
-    }
-  }, [cameraStreaming])
+  // Sharpness is computed client-side by CameraStream (Laplacian variance
+  // over a canvas grab of the live frame, once a second) and reported here
+  // directly via a callback -- no server round-trip needed for the web UI's
+  // own display, since this browser is the one that just computed it.
+  const handleSharpness = useCallback(({ sharpnessPercent }) => {
+    setSharpness(typeof sharpnessPercent === 'number' ? sharpnessPercent : null)
+  }, [])
+
+  const handleStreamingChange = useCallback((value) => {
+    setCameraStreaming(value)
+    if (!value) setSharpness(null)
+  }, [])
 
   useEffect(() => {
     if (!cameraStreaming) return
@@ -550,7 +533,8 @@ function App() {
         themePalette={themePalette}
         checked={cameraChecked}
         available={cameraAvailable}
-        onStreamingChange={setCameraStreaming}
+        onStreamingChange={handleStreamingChange}
+        onSharpness={handleSharpness}
         serverStreaming={cameraStats?.streaming ?? null}
       />
 

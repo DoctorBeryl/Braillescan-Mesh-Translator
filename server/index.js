@@ -42,7 +42,7 @@ const CAMERA_VIDEO_BINARY_FOR = {
   'rpicam-hello': 'rpicam-vid',
   'libcamera-hello': 'libcamera-vid',
 }
-const CAMERA_TARGET_FPS = 15
+const CAMERA_TARGET_FPS = 10
 
 const cameraStats = {
   streaming: false,
@@ -326,6 +326,7 @@ app.get('/api/camera/stream', async (req, res) => {
 
   let buffer = Buffer.alloc(0)
   let lastImageSavedAt = 0
+  let imageSaveInFlight = false
 
   child.stdout.on('data', (chunk) => {
     buffer = Buffer.concat([buffer, chunk])
@@ -355,11 +356,17 @@ app.get('/api/camera/stream', async (req, res) => {
 
       // Persist a still every IMAGE_SAVE_INTERVAL_MS so a scan pass builds up
       // a manageable set of frames in ./raspimages instead of flooding disk
-      // at the full stream framerate.
-      if (now - lastImageSavedAt >= IMAGE_SAVE_INTERVAL_MS) {
+      // at the full stream framerate. Writes are serialized (never more than
+      // one in flight) -- firing a new writeFile every second regardless of
+      // whether the previous one finished let writes pile up whenever the SD
+      // card fell behind, and they'd all land at once in a laggy burst.
+      if (!imageSaveInFlight && now - lastImageSavedAt >= IMAGE_SAVE_INTERVAL_MS) {
         lastImageSavedAt = now
+        imageSaveInFlight = true
         const filename = `img-${now}.jpg`
-        fs.writeFile(path.join(IMAGES_DIR, filename), frame).catch(() => {})
+        fs.writeFile(path.join(IMAGES_DIR, filename), frame)
+          .catch(() => {})
+          .finally(() => { imageSaveInFlight = false })
       }
 
       res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\n\r\n`)

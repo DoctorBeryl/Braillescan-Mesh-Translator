@@ -81,7 +81,7 @@ function App() {
   const [wifiStatus, setWifiStatus] = useState({ checked: false, connected: false, ssid: null, signal: null })
   const [latencyMs, setLatencyMs] = useState(null)
   const [storedImages, setStoredImages] = useState(0)
-  const [sharpness, setSharpness] = useState(88)
+  const [sharpness, setSharpness] = useState(null)
   const [distanceToSurface, setDistanceToSurface] = useState(null)
   const [systemStats, setSystemStats] = useState(null)
   const [cameraStats, setCameraStats] = useState(null)
@@ -264,15 +264,34 @@ function App() {
     }
   }, [targetLang, showTranslation])
 
+  // Sharpness is Laplacian-variance blur detection on the most recently
+  // saved still (see server/sharpness.py) -- polled at the same cadence as
+  // lcd.py's own sharpness check, since cv2's import is slow enough that
+  // polling faster just piles up overlapping requests without a fresher
+  // answer to show for it.
   useEffect(() => {
-    if (!cameraStreaming) return
-    const interval = setInterval(() => {
-      setSharpness((value) => {
-        const next = value + (Math.random() * 6 - 3)
-        return Math.max(58, Math.min(97, Math.round(next)))
-      })
-    }, 3000)
-    return () => clearInterval(interval)
+    if (!cameraStreaming) {
+      setSharpness(null)
+      return
+    }
+    let cancelled = false
+    const poll = () => {
+      fetch('/api/sharpness')
+        .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
+        .then(({ ok, data }) => {
+          if (cancelled) return
+          setSharpness(ok && typeof data.sharpnessPercent === 'number' ? data.sharpnessPercent : null)
+        })
+        .catch(() => {
+          if (!cancelled) setSharpness(null)
+        })
+    }
+    poll()
+    const interval = setInterval(poll, 3000)
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [cameraStreaming])
 
   useEffect(() => {
@@ -290,7 +309,10 @@ function App() {
         })
     }
     poll()
-    const interval = setInterval(poll, 300)
+    // 500ms, matching lcd.py's SCAN_POLL_INTERVAL_S -- polling much faster
+    // than the sensor script itself can reliably complete just causes
+    // overlapping distance.py invocations to contend for the same GPIO pins.
+    const interval = setInterval(poll, 500)
     return () => {
       cancelled = true
       clearInterval(interval)
@@ -529,6 +551,7 @@ function App() {
         checked={cameraChecked}
         available={cameraAvailable}
         onStreamingChange={setCameraStreaming}
+        serverStreaming={cameraStats?.streaming ?? null}
       />
 
       <div className={`space-y-2 rounded-2xl border p-3 ${themePalette.card}`}>
@@ -547,10 +570,10 @@ function App() {
               <Gauge className="h-3 w-3" strokeWidth={2.25} />
               Sharpness
             </p>
-            <span className={themePalette.text}>{cameraStreaming ? `${sharpness}%` : '—'}</span>
+            <span className={themePalette.text}>{cameraStreaming ? (sharpness == null ? 'Unavailable' : `${sharpness}%`) : '—'}</span>
           </div>
           <div className={`h-2 rounded-full ${tone.strong}`}>
-            <div className={`h-2 rounded-full ${tone.dot} transition-all`} style={{ width: `${cameraStreaming ? sharpness : 0}%` }} />
+            <div className={`h-2 rounded-full ${tone.dot} transition-all`} style={{ width: `${cameraStreaming && sharpness != null ? sharpness : 0}%` }} />
           </div>
         </div>
         <div className={`rounded-xl border p-2 ${themePalette.surface}`}>

@@ -1,12 +1,13 @@
-import { useState } from 'react'
-import { Camera } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Camera, Play } from 'lucide-react'
 
 const STREAM_URL = '/api/camera/stream'
 
-function CameraStream({ tone, themePalette, checked, available, onStreamingChange }) {
+function CameraStream({ tone, themePalette, checked, available, onStreamingChange, serverStreaming }) {
   const [streaming, setStreaming] = useState(false)
   const [streamError, setStreamError] = useState('')
   const [streamKey, setStreamKey] = useState(0)
+  const syncedFromServer = useRef(false)
 
   const setStreamingState = (value) => {
     setStreaming(value)
@@ -22,6 +23,25 @@ function CameraStream({ tone, themePalette, checked, available, onStreamingChang
     setStreamKey((value) => value + 1)
     setStreamingState(true)
   }
+
+  // The Pi is the source of truth for whether the camera is actually
+  // live (it's the one holding the rpicam-vid process). Reconcile once
+  // against that on the first real /api/camera/stats response -- e.g. a
+  // page reload should show "Live" immediately if the camera was already
+  // streaming, rather than defaulting to idle until someone re-toggles it.
+  // Only the initial sync auto-drives the toggle; afterwards the button and
+  // stream errors are what update `streaming`, so this doesn't fight a
+  // manual toggle click against a stale poll response.
+  useEffect(() => {
+    if (syncedFromServer.current || serverStreaming == null) return
+    syncedFromServer.current = true
+    if (serverStreaming && !streaming) {
+      setStreamError('')
+      setStreamKey((value) => value + 1)
+      setStreamingState(true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverStreaming])
 
   const handleStreamError = () => {
     setStreamingState(false)
@@ -44,9 +64,28 @@ function CameraStream({ tone, themePalette, checked, available, onStreamingChang
           type="button"
           onClick={toggleStream}
           disabled={!checked || !available}
-          className={`cursor-pointer rounded-full px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${streaming ? 'border border-emerald-400/30 bg-emerald-500/15 text-emerald-400' : tone.button}`}
+          aria-pressed={streaming}
+          title={streaming ? 'Stop the live camera stream' : 'Start the live camera stream'}
+          className={`inline-flex cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+            streaming
+              ? 'border-red-400/40 bg-red-500/15 text-red-400 hover:bg-red-500/25'
+              : `border-transparent ${tone.button} hover:brightness-110`
+          }`}
         >
-          {streaming ? 'Live' : 'Idle'}
+          {streaming ? (
+            <>
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-red-500" />
+              </span>
+              Stop stream
+            </>
+          ) : (
+            <>
+              <Play className="h-3.5 w-3.5" strokeWidth={2.25} fill="currentColor" />
+              Go live
+            </>
+          )}
         </button>
       </div>
 

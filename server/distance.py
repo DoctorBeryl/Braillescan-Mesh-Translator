@@ -30,29 +30,42 @@ def measure_batch(n=READINGS_PER_BATCH):
     GPIO.setup(ECHO_PIN, GPIO.IN)
     try:
         readings = []
-        for _ in range(n):
+        # An occasional missed echo (electrical noise, a scheduling hiccup on
+        # a busy Pi) used to fail the whole batch even though 3 of 4
+        # readings were fine -- retry individual misses instead, and only
+        # give up once retries can't produce enough good readings either.
+        max_attempts = n * 2
+        attempts = 0
+        while len(readings) < n and attempts < max_attempts:
+            attempts += 1
             time.sleep(TRIGGER_SETTLE_S)
 
             GPIO.output(TRIG_PIN, True)
             time.sleep(0.00002)
             GPIO.output(TRIG_PIN, False)
 
-            start_wait = time.time()
-            pulse_start = start_wait
-            while GPIO.input(ECHO_PIN) == 0:
-                pulse_start = time.time()
-                if pulse_start - start_wait > PULSE_TIMEOUT_S:
-                    raise TimeoutError('Timed out waiting for echo to start.')
+            try:
+                start_wait = time.time()
+                pulse_start = start_wait
+                while GPIO.input(ECHO_PIN) == 0:
+                    pulse_start = time.time()
+                    if pulse_start - start_wait > PULSE_TIMEOUT_S:
+                        raise TimeoutError('Timed out waiting for echo to start.')
 
-            end_wait = pulse_start
-            pulse_end = pulse_start
-            while GPIO.input(ECHO_PIN) == 1:
-                pulse_end = time.time()
-                if pulse_end - end_wait > PULSE_TIMEOUT_S:
-                    raise TimeoutError('Timed out waiting for echo to end.')
+                end_wait = pulse_start
+                pulse_end = pulse_start
+                while GPIO.input(ECHO_PIN) == 1:
+                    pulse_end = time.time()
+                    if pulse_end - end_wait > PULSE_TIMEOUT_S:
+                        raise TimeoutError('Timed out waiting for echo to end.')
+            except TimeoutError:
+                continue
 
             duration = pulse_end - pulse_start
             readings.append((duration * SPEED_OF_SOUND_CM_S) / 2)
+
+        if not readings:
+            raise TimeoutError('Timed out waiting for echo on every reading.')
         return readings
     finally:
         GPIO.cleanup((TRIG_PIN, ECHO_PIN))

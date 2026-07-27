@@ -18,12 +18,21 @@ const IMAGE_SAVE_INTERVAL_MS = 1000
 const COMPILE_SCRIPT = path.join(SERVER_DIR, 'compile.py')
 const COMPILE_TIMEOUT_MS = 5 * 60 * 1000
 const DISTANCE_SCRIPT = path.join(SERVER_DIR, 'distance.py')
-const DISTANCE_TIMEOUT_MS = 2000
+const DISTANCE_TIMEOUT_MS = 2500
 const DISTANCE_EMA_WEIGHT = 0.92
 let lastDistanceOutputCm = null
 const SHARPNESS_SCRIPT = path.join(SERVER_DIR, 'sharpness.py')
-const SHARPNESS_TIMEOUT_MS = 3000
+// cv2's import alone can take several seconds on Pi-class hardware, worse
+// while the camera stream is also eating CPU -- lcd.py's own HTTP timeout
+// for this endpoint (SHARPNESS_HTTP_TIMEOUT_S) is set above this value on
+// purpose, so raising this without raising that would just move the
+// "always times out" bug from here to there.
+const SHARPNESS_TIMEOUT_MS = 6000
 
+// Wipe stills left over from the previous session so a fresh boot always
+// starts a scan from an empty raspimages/ -- otherwise old frames would get
+// mixed into (or mistaken for) the next scan.
+await fs.rm(IMAGES_DIR, { recursive: true, force: true })
 await fs.mkdir(IMAGES_DIR, { recursive: true })
 
 // Raspberry Pi OS renamed libcamera-apps to rpicam-apps in late 2023;
@@ -40,6 +49,20 @@ const cameraStats = {
   startedAt: null,
   lastFrameAt: null,
   frameTimestamps: [],
+}
+
+// Only one rpicam-vid/libcamera-vid process can hold the camera device at a
+// time. Without this, quickly retoggling idle->live spawns a new process
+// before the old one has released the hardware, so the new stream fails to
+// acquire the camera -- the CameraStream <img> errors out and everything
+// downstream that gates on "is streaming" (distance/sharpness polling)
+// looks like it silently stopped.
+let cameraReleased = Promise.resolve()
+async function waitForCameraRelease() {
+  await Promise.race([
+    cameraReleased,
+    new Promise((resolve) => setTimeout(resolve, 3000)),
+  ])
 }
 
 const app = express()
@@ -245,6 +268,18 @@ app.get('/api/camera/stream', async (req, res) => {
     return
   }
 
+  await waitForCameraRelease()
+  if (res.writableEnded || req.destroyed) return
+
+  let released = false
+  let resolveReleased
+  cameraReleased = new Promise((resolve) => { resolveReleased = resolve })
+  const markReleased = () => {
+    if (released) return
+    released = true
+    resolveReleased()
+  }
+
   const child = spawn(videoBinary, [
     '-t', '0',
     '--codec', 'mjpeg',
@@ -269,6 +304,7 @@ app.get('/api/camera/stream', async (req, res) => {
 
   child.on('error', (err) => {
     cameraStats.streaming = false
+    markReleased()
     if (!res.headersSent) {
       res.status(500).json({ message: err.message })
     } else if (!res.writableEnded) {
@@ -277,6 +313,7 @@ app.get('/api/camera/stream', async (req, res) => {
   })
   child.on('exit', () => {
     cameraStats.streaming = false
+    markReleased()
     if (!res.writableEnded) res.end()
   })
 
@@ -410,61 +447,74 @@ app.post('/api/compile', async (_req, res) => {
   res.status(500).json({ success: false, message: lastErr.message })
 })
 
+async function runPythonJson(script, timeoutMs) {
+  let lastErr = new Error('No Python interpreter found (tried python3, python).')
+
+  for (const bin of PYTHON_BINARIES) {
+    try {
+      const stdout = await runLong(bin, [script], timeoutMs)
+      const data = JSON.parse(stdout.trim())
+      if (data.error) throw new Error(data.error)
+      return data
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        lastErr = err
+        continue
+      }
+      throw err
+    }
+  }
+
+  throw lastErr
+}
+
+// Both the web UI and lcd.py poll /api/distance and /api/sharpness on their
+// own timers, so their requests regularly overlap. Without coalescing, two
+// concurrent distance.py runs fight over the same TRIG/ECHO GPIO pins (each
+// opens/closes the channel itself), and two concurrent sharpness.py runs
+// each pay cv2's slow import separately -- either way overlap makes both
+// callers more likely to time out. Coalescing collapses concurrent callers
+// onto a single in-flight subprocess run.
+function coalesce(fn) {
+  let inFlight = null
+  return () => {
+    if (!inFlight) {
+      inFlight = fn().finally(() => { inFlight = null })
+    }
+    return inFlight
+  }
+}
+
+const readDistance = coalesce(() => runPythonJson(DISTANCE_SCRIPT, DISTANCE_TIMEOUT_MS))
+const readSharpness = coalesce(() => runPythonJson(SHARPNESS_SCRIPT, SHARPNESS_TIMEOUT_MS))
+
 // Distance is read from an HC-SR04 (TRIG on board pin 29, ECHO on pin 31)
 // via a short-lived Python helper -- Node has no first-party GPIO access.
 // distance.py takes 4 readings per call (in the time one used to take) and
 // returns their average; here that average is blended with the last output
 // (92% new / 8% previous) so the UI sees a smoothed value each poll.
 app.get('/api/distance', async (_req, res) => {
-  let lastErr = new Error('No Python interpreter found (tried python3, python).')
-
-  for (const bin of PYTHON_BINARIES) {
-    try {
-      const stdout = await runLong(bin, [DISTANCE_SCRIPT], DISTANCE_TIMEOUT_MS)
-      const data = JSON.parse(stdout.trim())
-      if (data.error) throw new Error(data.error)
-      const smoothedCm = lastDistanceOutputCm == null
-        ? data.distanceCm
-        : DISTANCE_EMA_WEIGHT * data.distanceCm + (1 - DISTANCE_EMA_WEIGHT) * lastDistanceOutputCm
-      lastDistanceOutputCm = smoothedCm
-      res.json({ distanceCm: Math.round(smoothedCm * 10) / 10 })
-      return
-    } catch (err) {
-      if (err.code === 'ENOENT') {
-        lastErr = err
-        continue
-      }
-      res.status(500).json({ message: err.message })
-      return
-    }
+  try {
+    const data = await readDistance()
+    const smoothedCm = lastDistanceOutputCm == null
+      ? data.distanceCm
+      : DISTANCE_EMA_WEIGHT * data.distanceCm + (1 - DISTANCE_EMA_WEIGHT) * lastDistanceOutputCm
+    lastDistanceOutputCm = smoothedCm
+    res.json({ distanceCm: Math.round(smoothedCm * 10) / 10 })
+  } catch (err) {
+    res.status(500).json({ message: err.message })
   }
-
-  res.status(500).json({ message: lastErr.message })
 })
 
 // Blur detection for the most recently saved still, via the same
 // Laplacian-variance check compile.py uses.
 app.get('/api/sharpness', async (_req, res) => {
-  let lastErr = new Error('No Python interpreter found (tried python3, python).')
-
-  for (const bin of PYTHON_BINARIES) {
-    try {
-      const stdout = await runLong(bin, [SHARPNESS_SCRIPT], SHARPNESS_TIMEOUT_MS)
-      const data = JSON.parse(stdout.trim())
-      if (data.error) throw new Error(data.error)
-      res.json(data)
-      return
-    } catch (err) {
-      if (err.code === 'ENOENT') {
-        lastErr = err
-        continue
-      }
-      res.status(500).json({ message: err.message })
-      return
-    }
+  try {
+    const data = await readSharpness()
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ message: err.message })
   }
-
-  res.status(500).json({ message: lastErr.message })
 })
 
 app.get('/api/camera/stats', (_req, res) => {

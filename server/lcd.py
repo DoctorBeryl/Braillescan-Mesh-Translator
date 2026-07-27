@@ -44,8 +44,15 @@ STATIC_HOLD_S = 3
 
 SERVER_BASE_URL = f'http://127.0.0.1:{os.environ.get("WIFI_SERVER_PORT", "3001")}'
 HTTP_TIMEOUT_S = 1.0
+# /api/distance and /api/sharpness spawn their own Python subprocess on the
+# server and can legitimately take a while, especially while the camera
+# stream is also eating CPU. These MUST stay comfortably above index.js's
+# own DISTANCE_TIMEOUT_MS / SHARPNESS_TIMEOUT_MS -- if the LCD gives up
+# first, both fields sit on "--" forever even though the server would have
+# come back with a real reading a moment later.
+DISTANCE_HTTP_TIMEOUT_S = 3.0
 # /api/sharpness imports cv2, which is slow to start on Pi hardware.
-SHARPNESS_HTTP_TIMEOUT_S = 4.0
+SHARPNESS_HTTP_TIMEOUT_S = 7.0
 SHARPNESS_POLL_INTERVAL_S = 3.0
 SCAN_POLL_INTERVAL_S = 0.5
 
@@ -123,7 +130,7 @@ def fetch_streaming():
 
 def fetch_distance_cm():
     try:
-        return fetch_json('/api/distance').get('distanceCm')
+        return fetch_json('/api/distance', timeout=DISTANCE_HTTP_TIMEOUT_S).get('distanceCm')
     except (urllib.error.URLError, OSError, ValueError):
         return None
 

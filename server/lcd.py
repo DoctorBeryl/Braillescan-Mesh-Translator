@@ -15,6 +15,7 @@ row 1 shows sharpness%, replaced by a reposition/blur warning when blurry.
 """
 import json
 import os
+import signal
 import time
 import urllib.error
 import urllib.request
@@ -28,6 +29,7 @@ DATA_PINS = (23, 17, 18, 22)  # D4, D5, D6, D7
 LCD_WIDTH = 16
 LINE1_ADDR = 0x80
 LINE2_ADDR = 0xC0
+DISPLAY_OFF_CMD = 0x08
 
 E_PULSE_S = 0.0005
 E_DELAY_S = 0.0005
@@ -164,6 +166,28 @@ def scan_lines(distance_cm, blurry, sharpness_percent):
     return line1, line2
 
 
+def lcd_off():
+    # Blank both lines and drop the HD44780's own display bit, so the panel
+    # goes dark right away instead of freezing on whatever it was mid-render
+    # when the shutdown signal arrived and staying lit until the Pi's power
+    # actually cuts a few seconds later.
+    lcd_write_line('', LINE1_ADDR)
+    lcd_write_line('', LINE2_ADDR)
+    lcd_send_byte(DISPLAY_OFF_CMD, is_data=False)
+
+
+# systemd sends SIGTERM (not SIGINT) to stop this service, including during
+# `poweroff`/`reboot` -- systemd stops services before the actual power-off
+# happens, but Python doesn't turn SIGTERM into KeyboardInterrupt on its own,
+# so without this the process was just killed mid-frame, leaving the LCD
+# showing stale content until power cut rather than turning off first.
+def handle_shutdown_signal(signum, frame):
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGTERM, handle_shutdown_signal)
+
+
 def main():
     lcd_init()
     last_blurry = None
@@ -190,6 +214,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        lcd_off()
         GPIO.cleanup()
 
 

@@ -365,7 +365,11 @@ app.get('/api/camera/stream', async (req, res) => {
         imageSaveInFlight = true
         const filename = `img-${now}.jpg`
         fs.writeFile(path.join(IMAGES_DIR, filename), frame)
-          .catch(() => {})
+          // Errors here used to vanish silently, so a stuck image counter
+          // gave no clue whether frames just weren't arriving or writes
+          // were actually failing (e.g. disk pressure) -- log so that
+          // distinction shows up in the service's journal.
+          .catch((err) => console.error(`Failed to save ${filename}:`, err.message))
           .finally(() => { imageSaveInFlight = false })
       }
 
@@ -476,24 +480,43 @@ async function runPythonJson(script, timeoutMs) {
 }
 
 // Both the web UI and lcd.py poll /api/distance and /api/sharpness on their
-// own timers, so their requests regularly overlap. Without coalescing, two
-// concurrent distance.py runs fight over the same TRIG/ECHO GPIO pins (each
-// opens/closes the channel itself), and two concurrent sharpness.py runs
-// each pay cv2's slow import separately -- either way overlap makes both
-// callers more likely to time out. Coalescing collapses concurrent callers
-// onto a single in-flight subprocess run.
-function coalesce(fn) {
+// own timers at the same cadence, so their requests regularly land close
+// together without actually overlapping. Coalescing alone only merges calls
+// that are truly in-flight at the same instant -- two callers a few hundred
+// ms out of phase each still spawn their own subprocess. On a Pi 3 A+ (512MB
+// RAM), two independent cv2 imports (sharpness.py) or two GPIO-contending
+// distance.py runs every poll cycle is real, sustained CPU/memory pressure
+// (visible as python3 and kswapd0 usage while the camera stream is also
+// competing for the CPU), so on top of coalescing the in-flight case, cache
+// the last result for slightly under the shared poll interval -- any caller
+// within that window gets the still-fresh cached reading instead of forcing
+// a second subprocess spawn.
+function coalesce(fn, cacheTtlMs = 0) {
   let inFlight = null
+  let cachedAt = 0
+  let cachedValue
   return () => {
+    if (cacheTtlMs > 0 && cachedAt && Date.now() - cachedAt < cacheTtlMs) {
+      return Promise.resolve(cachedValue)
+    }
     if (!inFlight) {
-      inFlight = fn().finally(() => { inFlight = null })
+      inFlight = fn()
+        .then((value) => {
+          cachedValue = value
+          cachedAt = Date.now()
+          return value
+        })
+        .finally(() => { inFlight = null })
     }
     return inFlight
   }
 }
 
-const readDistance = coalesce(() => runPythonJson(DISTANCE_SCRIPT, DISTANCE_TIMEOUT_MS))
-const readSharpness = coalesce(() => runPythonJson(SHARPNESS_SCRIPT, SHARPNESS_TIMEOUT_MS))
+// Kept comfortably under each poll's own interval (500ms / 3000ms) so a
+// caller never sees a reading older than one poll cycle -- this only
+// absorbs the redundant second subprocess spawn, not the actual refresh rate.
+const readDistance = coalesce(() => runPythonJson(DISTANCE_SCRIPT, DISTANCE_TIMEOUT_MS), 400)
+const readSharpness = coalesce(() => runPythonJson(SHARPNESS_SCRIPT, SHARPNESS_TIMEOUT_MS), 2500)
 
 // Distance is read from an HC-SR04 (TRIG on board pin 29, ECHO on pin 31)
 // via a short-lived Python helper -- Node has no first-party GPIO access.

@@ -1,32 +1,34 @@
-// Detects crescent-shaped highlights/shadows in a still -- the signature an
-// embossed Braille dot leaves under angled light (one side of the bump lit,
-// the other in shadow, each a partial arc rather than a filled disk).
+// Detects the highlight/shadow blob an embossed Braille dot leaves under
+// angled or diffuse light -- anything from a sharp partial arc (a crescent,
+// under raking light) to a soft, nearly-filled round highlight (under
+// flatter/diffuse light or a blurry capture). Real captures land anywhere
+// on that spectrum depending on lighting angle and focus, so both ends
+// need to count as a detected dot.
 //
 // Approach: binarize the frame both ways (bright-blob-on-dark and
 // dark-blob-on-bright, since "any contrast level" means we don't know which
 // side of the surface is lit), find connected blobs, and score each one
-// against shape descriptors that a crescent satisfies but a filled disk,
-// thin scratch, or noise speck doesn't:
+// against shape descriptors that reject noise/scratches/background but
+// don't cap out at "crescent" the way an upper bound would:
 //   - fill ratio: area vs. the area of the smallest circle enclosing it.
-//     A filled dot is close to 1; a thin ring/crescent is a fraction of it.
+//     A thin sliver or noise speck scores low; both crescents and filled
+//     round highlights score higher, so only a floor is enforced.
 //   - solidity: area vs. convex-hull area. A crescent is concave (its hull
-//     bridges the "bite" taken out of it), so solidity sits well below 1;
-//     a disk is already convex, so its solidity is close to 1.
-//   - circularity: 4*pi*area / perimeter^2. Disks score high, jagged noise
-//     scores low, a smooth arc lands in between.
-// All three are rotation-invariant, so a crescent is recognized "pointing"
-// any direction without needing to search over orientations.
+//     bridges the "bite" taken out of it) so it sits mid-range; a filled
+//     disk is already convex and sits close to 1 -- both are valid dots,
+//     only very low solidity (jagged/sparse noise) is rejected.
+//   - circularity: 4*pi*area / perimeter^2. Disks and smooth arcs both
+//     score high; only jagged noise scores low, so only a floor applies.
+// All three are rotation-invariant, so a dot is recognized regardless of
+// which way its "bite" (if any) is pointing.
 
 const MIN_COMPONENT_AREA = 6
 const MAX_COMPONENT_AREA_FRACTION = 0.02
 const MIN_ASPECT_RATIO = 0.3
 const MAX_ASPECT_RATIO = 3.3
 const MIN_FILL_RATIO = 0.15
-const MAX_FILL_RATIO = 0.68
 const MIN_SOLIDITY = 0.3
-const MAX_SOLIDITY = 0.88
 const MIN_CIRCULARITY = 0.1
-const MAX_CIRCULARITY = 0.82
 export const MIN_CRESCENTS_REQUIRED = 2
 // Flood fill visits every pixel of every blob; cap the analysis resolution
 // so a batch of dozens of stills stays fast in the browser.
@@ -191,12 +193,12 @@ function convexHullArea(points) {
   return Math.abs(area) / 2
 }
 
-// Algebraic (Kasa) least-squares circle fit over x^2+y^2+Dx+Ey+F=0. A
-// crescent's own outline traces part of the rim of the raised dot that
-// cast it (the arc where the highlight/shadow bites into the surface), so
-// fitting a circle through those boundary pixels approximates where the
-// dot's center sits even though the mask only covers a partial arc, never
-// the full disk.
+// Algebraic (Kasa) least-squares circle fit over x^2+y^2+Dx+Ey+F=0. The
+// blob's own outline traces the rim of the raised dot that cast it --
+// whether that's only a partial arc (a crescent, the highlight/shadow
+// "bite") or the full rim of a filled highlight -- so fitting a circle
+// through those boundary pixels approximates where the dot is centered
+// either way.
 function fitCircle(points) {
   const n = points.length
   if (n < 3) return null
@@ -238,7 +240,7 @@ function fitCircle(points) {
   return { cx, cy, r: Math.sqrt(rSq) }
 }
 
-function isCrescentShaped(component, imageArea) {
+function isDotShaped(component, imageArea) {
   const { area, perimeter, minX, maxX, minY, maxY, centroidX, centroidY, boundary } = component
   if (area < MIN_COMPONENT_AREA || area > imageArea * MAX_COMPONENT_AREA_FRACTION) return false
 
@@ -256,14 +258,14 @@ function isCrescentShaped(component, imageArea) {
   }
   const radius = Math.max(maxDist, 1)
   const fillRatio = area / (Math.PI * radius * radius)
-  if (fillRatio < MIN_FILL_RATIO || fillRatio > MAX_FILL_RATIO) return false
+  if (fillRatio < MIN_FILL_RATIO) return false
 
   const circularity = perimeter > 0 ? (4 * Math.PI * area) / (perimeter * perimeter) : 0
-  if (circularity < MIN_CIRCULARITY || circularity > MAX_CIRCULARITY) return false
+  if (circularity < MIN_CIRCULARITY) return false
 
   const hullArea = convexHullArea(boundary)
   const solidity = hullArea > 0 ? Math.min(1, area / hullArea) : 0
-  if (solidity < MIN_SOLIDITY || solidity > MAX_SOLIDITY) return false
+  if (solidity < MIN_SOLIDITY) return false
 
   return true
 }
@@ -282,10 +284,11 @@ export function sampleForCrescentDetection(source, canvas, sourceWidth, sourceHe
   return ctx.getImageData(0, 0, width, height)
 }
 
-// Finds blobs in `imageData` whose shape matches a crescent, checking both
-// polarities (bright arc on dark ground, and dark arc on bright ground),
-// and fits a circle to each one's outline -- the caller's estimate of
-// where the embossed dot underneath it is actually centered.
+// Finds blobs in `imageData` shaped like a Braille dot's highlight/shadow
+// (crescent or filled), checking both polarities (bright blob on dark
+// ground, and dark blob on bright ground), and fits a circle to each one's
+// outline -- the caller's estimate of where the embossed dot underneath it
+// is actually centered.
 export function detectCrescentCircles(imageData) {
   const { data, width, height } = imageData
   const gray = stretchContrast(toGrayscale(data, width, height))
@@ -300,7 +303,7 @@ export function detectCrescentCircles(imageData) {
     }
     const components = findComponents(mask, width, height)
     for (const component of components) {
-      if (!isCrescentShaped(component, imageArea)) continue
+      if (!isDotShaped(component, imageArea)) continue
       const circle = fitCircle(component.boundary)
       if (circle) circles.push(circle)
     }

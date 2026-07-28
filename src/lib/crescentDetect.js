@@ -284,6 +284,79 @@ export function sampleForCrescentDetection(source, canvas, sourceWidth, sourceHe
   return ctx.getImageData(0, 0, width, height)
 }
 
+// A printed letter, once the same Otsu split that isolates a dot's
+// highlight/shadow also binarizes the page's ink, is often just as round,
+// filled, and solid as a real dot blob -- "o", "e", "s" all sail through
+// isDotShaped's floors. Shape alone can't tell the two apart. What does:
+// Braille dots always sit on a fixed-pitch grid (dot-to-dot within a cell,
+// cell-to-cell), while stray text blobs land at whatever spacing their
+// neighboring letters happen to have. So with enough candidates to see the
+// pattern, find the dominant nearest-neighbor spacing and keep only the
+// circles that actually participate in it.
+const MIN_CANDIDATES_FOR_GRID_FILTER = 6
+const GRID_PITCH_TOLERANCE = 0.25
+const GRID_PITCH_MULTIPLES = [1, 2, 3]
+
+function nearestNeighborDistances(circles) {
+  return circles.map((c, i) => {
+    let best = Infinity
+    for (let j = 0; j < circles.length; j += 1) {
+      if (j === i) continue
+      const dx = c.cx - circles[j].cx
+      const dy = c.cy - circles[j].cy
+      const d = Math.sqrt(dx * dx + dy * dy)
+      if (d < best) best = d
+    }
+    return best
+  })
+}
+
+// Mode of the nearest-neighbor distances, via a histogram binned relative
+// to their own median -- real dot pitch dominates the count once there are
+// enough genuine dots, regardless of the page's absolute scale/resolution.
+function estimateGridPitch(nnDistances) {
+  const finite = nnDistances.filter((d) => Number.isFinite(d)).sort((a, b) => a - b)
+  if (finite.length === 0) return null
+
+  const median = finite[Math.floor(finite.length / 2)]
+  const bucketSize = Math.max(1.5, median * 0.2)
+
+  const counts = new Map()
+  for (const d of finite) {
+    const key = Math.round(d / bucketSize)
+    counts.set(key, (counts.get(key) || 0) + 1)
+  }
+  let bestKey = null
+  let bestCount = 0
+  for (const [key, count] of counts) {
+    if (count > bestCount) {
+      bestCount = count
+      bestKey = key
+    }
+  }
+  return bestKey === null ? null : bestKey * bucketSize
+}
+
+function filterToGrid(circles) {
+  if (circles.length < MIN_CANDIDATES_FOR_GRID_FILTER) return circles
+
+  const nn = nearestNeighborDistances(circles)
+  const pitch = estimateGridPitch(nn)
+  if (!pitch) return circles
+
+  const kept = circles.filter((circle, i) => {
+    for (const k of GRID_PITCH_MULTIPLES) {
+      const target = pitch * k
+      if (Math.abs(nn[i] - target) <= target * GRID_PITCH_TOLERANCE) return true
+    }
+    return false
+  })
+
+  // A weak/absent pattern (e.g. a handful of real dots with no repetition
+  // yet) shouldn't make detection strictly worse than not filtering at all.
+  return kept.length > 0 ? kept : circles
+}
+
 // Finds blobs in `imageData` shaped like a Braille dot's highlight/shadow
 // (crescent or filled), checking both polarities (bright blob on dark
 // ground, and dark blob on bright ground), and fits a circle to each one's
@@ -308,5 +381,5 @@ export function detectCrescentCircles(imageData) {
       if (circle) circles.push(circle)
     }
   }
-  return circles
+  return filterToGrid(circles)
 }

@@ -3,7 +3,7 @@ import { Activity, Aperture, Box, Bug, Clock, Cpu, Crosshair, Download, External
 import WifiPanel from './components/WifiPanel'
 import CameraStream from './components/CameraStream'
 import { computeSharpness, sampleImageData } from './lib/sharpness'
-import { hasCrescentShapes, sampleForCrescentDetection } from './lib/crescentDetect'
+import { MIN_CRESCENTS_REQUIRED, detectCrescentCircles, sampleForCrescentDetection } from './lib/crescentDetect'
 import { base64ToBytes, createZipBlob, downloadBlob } from './lib/zip'
 
 const tabs = [
@@ -460,6 +460,7 @@ function App() {
 
       const allImages = imagesData.images ?? []
       const canvas = document.createElement('canvas')
+      const markupCanvas = document.createElement('canvas')
       const matches = []
 
       for (let i = 0; i < allImages.length; i += 1) {
@@ -479,9 +480,28 @@ function App() {
         if (sharpnessPercent < COMPILE_MIN_SHARPNESS_PERCENT) continue
 
         const detectionData = sampleForCrescentDetection(img, canvas, img.naturalWidth, img.naturalHeight)
-        if (!hasCrescentShapes(detectionData)) continue
+        const circles = detectCrescentCircles(detectionData)
+        if (circles.length < MIN_CRESCENTS_REQUIRED) continue
 
-        matches.push(image)
+        // Mark each detected dot's estimated center on the full-resolution
+        // still, scaling up from the downscaled detection canvas, so the
+        // zipped image lets a human sanity-check the detector's calls.
+        const scaleX = img.naturalWidth / detectionData.width
+        const scaleY = img.naturalHeight / detectionData.height
+        markupCanvas.width = img.naturalWidth
+        markupCanvas.height = img.naturalHeight
+        const markupCtx = markupCanvas.getContext('2d')
+        markupCtx.drawImage(img, 0, 0)
+        markupCtx.fillStyle = '#22c55e'
+        const markerRadius = Math.max(2, Math.round(Math.min(img.naturalWidth, img.naturalHeight) * 0.006))
+        for (const { cx, cy } of circles) {
+          markupCtx.beginPath()
+          markupCtx.arc(cx * scaleX, cy * scaleY, markerRadius, 0, Math.PI * 2)
+          markupCtx.fill()
+        }
+        const annotatedData = markupCanvas.toDataURL('image/jpeg', 0.92).split(',')[1]
+
+        matches.push({ name: image.name, data: annotatedData })
       }
 
       setImagesPopup({ images: matches })

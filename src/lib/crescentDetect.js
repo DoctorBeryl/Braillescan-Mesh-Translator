@@ -27,7 +27,7 @@ const MIN_SOLIDITY = 0.3
 const MAX_SOLIDITY = 0.88
 const MIN_CIRCULARITY = 0.1
 const MAX_CIRCULARITY = 0.82
-const MIN_CRESCENTS_REQUIRED = 2
+export const MIN_CRESCENTS_REQUIRED = 2
 // Flood fill visits every pixel of every blob; cap the analysis resolution
 // so a batch of dozens of stills stays fast in the browser.
 const MAX_DETECT_DIMENSION = 260
@@ -191,6 +191,53 @@ function convexHullArea(points) {
   return Math.abs(area) / 2
 }
 
+// Algebraic (Kasa) least-squares circle fit over x^2+y^2+Dx+Ey+F=0. A
+// crescent's own outline traces part of the rim of the raised dot that
+// cast it (the arc where the highlight/shadow bites into the surface), so
+// fitting a circle through those boundary pixels approximates where the
+// dot's center sits even though the mask only covers a partial arc, never
+// the full disk.
+function fitCircle(points) {
+  const n = points.length
+  if (n < 3) return null
+
+  let sumX = 0, sumY = 0, sumXX = 0, sumYY = 0, sumXY = 0
+  let sumXZ = 0, sumYZ = 0, sumZ = 0
+  for (const [x, y] of points) {
+    const z = x * x + y * y
+    sumX += x
+    sumY += y
+    sumXX += x * x
+    sumYY += y * y
+    sumXY += x * y
+    sumXZ += x * z
+    sumYZ += y * z
+    sumZ += z
+  }
+
+  const a11 = sumXX, a12 = sumXY, a13 = sumX
+  const a21 = sumXY, a22 = sumYY, a23 = sumY
+  const a31 = sumX, a32 = sumY, a33 = n
+  const b1 = -sumXZ, b2 = -sumYZ, b3 = -sumZ
+
+  const det = a11 * (a22 * a33 - a23 * a32) - a12 * (a21 * a33 - a23 * a31) + a13 * (a21 * a32 - a22 * a31)
+  if (Math.abs(det) < 1e-9) return null
+
+  const detD = b1 * (a22 * a33 - a23 * a32) - a12 * (b2 * a33 - a23 * b3) + a13 * (b2 * a32 - a22 * b3)
+  const detE = a11 * (b2 * a33 - a23 * b3) - b1 * (a21 * a33 - a23 * a31) + a13 * (a21 * b3 - b2 * a31)
+  const detF = a11 * (a22 * b3 - b2 * a32) - a12 * (a21 * b3 - b2 * a31) + b1 * (a21 * a32 - a22 * a31)
+
+  const D = detD / det
+  const E = detE / det
+  const F = detF / det
+
+  const cx = -D / 2
+  const cy = -E / 2
+  const rSq = cx * cx + cy * cy - F
+  if (rSq <= 0) return null
+  return { cx, cy, r: Math.sqrt(rSq) }
+}
+
 function isCrescentShaped(component, imageArea) {
   const { area, perimeter, minX, maxX, minY, maxY, centroidX, centroidY, boundary } = component
   if (area < MIN_COMPONENT_AREA || area > imageArea * MAX_COMPONENT_AREA_FRACTION) return false
@@ -235,15 +282,17 @@ export function sampleForCrescentDetection(source, canvas, sourceWidth, sourceHe
   return ctx.getImageData(0, 0, width, height)
 }
 
-// Counts blobs in `imageData` whose shape matches a crescent, checking both
-// polarities (bright arc on dark ground, and dark arc on bright ground).
-export function countCrescentShapes(imageData) {
+// Finds blobs in `imageData` whose shape matches a crescent, checking both
+// polarities (bright arc on dark ground, and dark arc on bright ground),
+// and fits a circle to each one's outline -- the caller's estimate of
+// where the embossed dot underneath it is actually centered.
+export function detectCrescentCircles(imageData) {
   const { data, width, height } = imageData
   const gray = stretchContrast(toGrayscale(data, width, height))
   const threshold = otsuThreshold(gray)
   const imageArea = width * height
 
-  let crescents = 0
+  const circles = []
   for (const polarity of [1, 0]) {
     const mask = new Uint8Array(imageArea)
     for (let i = 0; i < gray.length; i += 1) {
@@ -251,12 +300,10 @@ export function countCrescentShapes(imageData) {
     }
     const components = findComponents(mask, width, height)
     for (const component of components) {
-      if (isCrescentShaped(component, imageArea)) crescents += 1
+      if (!isCrescentShaped(component, imageArea)) continue
+      const circle = fitCircle(component.boundary)
+      if (circle) circles.push(circle)
     }
   }
-  return crescents
-}
-
-export function hasCrescentShapes(imageData) {
-  return countCrescentShapes(imageData) >= MIN_CRESCENTS_REQUIRED
+  return circles
 }

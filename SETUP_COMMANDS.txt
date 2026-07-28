@@ -166,32 +166,34 @@ Comenzi serviciu:
   sudo journalctl -u braillescan-lcd.service -f   # Logs
 
 ================================================================================
-8. PERMISIUNI ADMIN (Reboot / Poweroff din interfața web)
+8. PERMISIUNI ADMIN (Reboot / Poweroff / Wi-Fi din interfața web)
 ================================================================================
 
 Meniul Admin din aplicație rulează "sudo -n reboot" și "sudo -n poweroff".
-Flag-ul -n interzice sudo să ceară parola interactiv (procesul Node nu are
-un terminal atașat), deci dacă utilizatorul "pi" nu are sudo fără parolă
-configurat pentru aceste două comenzi, ele eșuează imediat cu eroarea
-"sudo: a password is required" — acesta este motivul cel mai probabil
-pentru care meniul Admin nu funcționează.
+Meniul Wi-Fi (scanare, status, conectare pe wlan1) și comanda "Restart
+Wi-Fi interface" rulează "sudo -n nmcli ...". Flag-ul -n interzice sudo să
+ceară parola interactiv (procesul Node nu are un terminal atașat), deci
+dacă utilizatorul "pi" nu are sudo fără parolă configurat pentru aceste
+comenzi, ele eșuează imediat cu eroarea "sudo: a password is required" —
+acesta este motivul cel mai probabil pentru care meniul Admin sau meniul
+Wi-Fi nu funcționează.
 
 Aflați calea reală a binarelor (poate diferi de exemplul de mai jos):
-  which reboot poweroff
+  which reboot poweroff nmcli
 
 Adăugați o regulă NOPASSWD doar pentru aceste comenzi (recomandat, nu
 pentru tot sudo):
   sudo visudo -f /etc/sudoers.d/braillescan-admin
 
 Introduceți (ajustați căile dacă "which" a arătat altceva):
-  pi ALL=(ALL) NOPASSWD: /usr/sbin/reboot, /usr/sbin/poweroff
+  pi ALL=(ALL) NOPASSWD: /usr/sbin/reboot, /usr/sbin/poweroff, /usr/bin/nmcli
 
 Salvare (Ctrl+X, Y, Enter) — visudo validează sintaxa automat înainte de
 a scrie fișierul, deci o greșeală de sintaxă nu vă poate bloca sudo-ul.
 
 Verificare (fără să reporniți efectiv dispozitivul):
   sudo -n -l
-  # Comenzile "reboot" și "poweroff" trebuie să apară cu (NOPASSWD)
+  # Comenzile "reboot", "poweroff" și "nmcli" trebuie să apară cu (NOPASSWD)
 
 ================================================================================
 COMENZI RAPIDE

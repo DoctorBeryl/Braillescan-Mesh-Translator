@@ -99,6 +99,22 @@ function run(cmd, args) {
   })
 }
 
+// nmcli needs root to scan/connect on most systems (NetworkManager's polkit
+// rules don't grant this to the "pi" user by default). `-n` refuses to
+// prompt for a password since Node has no attached tty -- see the
+// NOPASSWD sudoers rule in SETUP_COMMANDS.txt.
+function runNmcli(args) {
+  return run('sudo', ['-n', 'nmcli', ...args])
+}
+
+// Surfaces the same "passwordless sudo isn't configured" hint the Admin
+// menu uses instead of the raw, confusing sudo stderr.
+function friendlySudoMessage(err) {
+  return /password is required|no tty present/i.test(err.message)
+    ? `${err.message} — passwordless sudo isn't configured for nmcli. See "PERMISIUNI ADMIN" in SETUP_COMMANDS.txt.`
+    : err.message
+}
+
 // Like run(), but with no output-buffer limit and a much longer timeout --
 // stitching a batch of images can take far longer than the 20s budget used
 // for quick system commands, especially on Pi-class hardware.
@@ -158,7 +174,7 @@ function parseTerseLine(line) {
 
 app.get('/api/wifi/networks', async (_req, res) => {
   try {
-    const stdout = await run('nmcli', [
+    const stdout = await runNmcli([
       '-t',
       '-f', 'SSID,SIGNAL,SECURITY,IN-USE',
       'device', 'wifi', 'list',
@@ -187,13 +203,13 @@ app.get('/api/wifi/networks', async (_req, res) => {
     const networks = [...bySsid.values()].sort((a, b) => b.signal - a.signal)
     res.json({ networks })
   } catch (err) {
-    res.status(500).json({ message: err.message })
+    res.status(500).json({ message: friendlySudoMessage(err) })
   }
 })
 
 app.get('/api/wifi/status', async (_req, res) => {
   try {
-    const stdout = await run('nmcli', [
+    const stdout = await runNmcli([
       '-t',
       '-f', 'SSID,SIGNAL,IN-USE',
       'device', 'wifi', 'list',
@@ -214,7 +230,7 @@ app.get('/api/wifi/status', async (_req, res) => {
     }
     res.json({ connected: Boolean(ssid), ssid, signal })
   } catch (err) {
-    res.status(500).json({ connected: false, ssid: null, signal: null, message: err.message })
+    res.status(500).json({ connected: false, ssid: null, signal: null, message: friendlySudoMessage(err) })
   }
 })
 
@@ -247,10 +263,10 @@ app.post('/api/wifi/connect', async (req, res) => {
   args.push('ifname', WIFI_IFACE)
 
   try {
-    const stdout = await run('nmcli', args)
+    const stdout = await runNmcli(args)
     res.json({ success: true, message: stdout.trim() })
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message })
+    res.status(500).json({ success: false, message: friendlySudoMessage(err) })
   }
 })
 
@@ -714,7 +730,7 @@ app.get('/api/system/stats', async (_req, res) => {
 const SYSTEM_COMMANDS = {
   reboot: { label: 'Reboot device', cmd: 'sudo', args: ['-n', 'reboot'] },
   poweroff: { label: 'Power off device', cmd: 'sudo', args: ['-n', 'poweroff'] },
-  'restart-network': { label: 'Restart Wi-Fi interface', cmd: 'nmcli', args: ['device', 'reconnect', WIFI_IFACE] },
+  'restart-network': { label: 'Restart Wi-Fi interface', cmd: 'sudo', args: ['-n', 'nmcli', 'device', 'reconnect', WIFI_IFACE] },
   'disk-usage': { label: 'Check disk usage', cmd: 'df', args: ['-h'] },
 }
 

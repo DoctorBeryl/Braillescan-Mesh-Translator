@@ -1,38 +1,20 @@
-// Detects the highlight/shadow blob an embossed Braille dot leaves under
-// angled or diffuse light -- anything from a sharp partial arc (a crescent,
-// under raking light) to a soft, nearly-filled round highlight (under
-// flatter/diffuse light or a blurry capture). Real captures land anywhere
-// on that spectrum depending on lighting angle and focus, so both ends
-// need to count as a detected dot.
-//
-// Approach: binarize the frame both ways (bright-blob-on-dark and
-// dark-blob-on-bright, since "any contrast level" means we don't know which
-// side of the surface is lit), find connected blobs, and score each one
-// against shape descriptors that reject noise/scratches/background but
-// don't cap out at "crescent" the way an upper bound would:
-//   - fill ratio: area vs. the area of the smallest circle enclosing it.
-//     A thin sliver or noise speck scores low; both crescents and filled
-//     round highlights score higher, so only a floor is enforced.
-//   - solidity: area vs. convex-hull area. A crescent is concave (its hull
-//     bridges the "bite" taken out of it) so it sits mid-range; a filled
-//     disk is already convex and sits close to 1 -- both are valid dots,
-//     only very low solidity (jagged/sparse noise) is rejected.
-//   - circularity: 4*pi*area / perimeter^2. Disks and smooth arcs both
-//     score high; only jagged noise scores low, so only a floor applies.
-// All three are rotation-invariant, so a dot is recognized regardless of
-// which way its "bite" (if any) is pointing.
-
-const MIN_COMPONENT_AREA = 6
-const MAX_COMPONENT_AREA_FRACTION = 0.02
-const MIN_ASPECT_RATIO = 0.3
-const MAX_ASPECT_RATIO = 3.3
-const MIN_FILL_RATIO = 0.15
-const MIN_SOLIDITY = 0.3
-const MIN_CIRCULARITY = 0.1
 export const MIN_CRESCENTS_REQUIRED = 2
-// Flood fill visits every pixel of every blob; cap the analysis resolution
-// so a batch of dozens of stills stays fast in the browser.
 const MAX_DETECT_DIMENSION = 260
+
+const MIN_RADIUS_FRACTION = 0.035
+const MAX_RADIUS_FRACTION = 0.085
+const CLAHE_TILE_RADIUS_MULTIPLE = 2.5
+const CLAHE_CLIP_LIMIT = 3.0
+const LOCAL_BRIGHTNESS_SIGMA_RADIUS_MULTIPLE = 1.6
+const LOCAL_BRIGHTNESS_CLIP_STD = 2.5
+const LOCAL_BRIGHTNESS_MIN_STD = 0.75
+const GRADIENT_BLUR_SIGMA = 1.3
+const MIN_ACCUMULATOR_DP = 1.0
+const MAX_ACCUMULATOR_DP = 2.0
+const ACCUMULATOR_DP_RADIUS_CONSTANT = 20
+const MIN_DIST_RADIUS_MULTIPLE = 1.1
+const MIN_RING_SUPPORT = 0.3
+const MIN_RING_VOTES_ABSOLUTE = 14
 
 function toGrayscale(data, width, height) {
   const gray = new Float32Array(width * height)
@@ -42,8 +24,6 @@ function toGrayscale(data, width, height) {
   return gray
 }
 
-// Stretches to the full 0-255 range so the same thresholds work regardless
-// of how flatly or richly lit the source still is.
 function stretchContrast(gray) {
   let min = Infinity
   let max = -Infinity
@@ -59,9 +39,6 @@ function stretchContrast(gray) {
   return out
 }
 
-// Otsu's method: picks the threshold that maximizes between-class variance
-// of a 0-255 histogram -- an automatic split point instead of a fixed one,
-// so it adapts to each still's own contrast.
 function otsuThreshold(gray) {
   const hist = new Array(256).fill(0)
   for (let i = 0; i < gray.length; i += 1) {
@@ -92,228 +69,192 @@ function otsuThreshold(gray) {
   return best
 }
 
-// 4-connected flood fill labeling, iterative (stack-based) to avoid blowing
-// the call stack on a large blob. Returns one descriptor per component.
-function findComponents(mask, width, height) {
-  const visited = new Uint8Array(width * height)
-  const stack = new Int32Array(width * height)
-  const components = []
+function clahe(gray, width, height, tilesX, tilesY, clipLimit) {
+  const tileW = width / tilesX
+  const tileH = height / tilesY
 
-  for (let start = 0; start < mask.length; start += 1) {
-    if (!mask[start] || visited[start]) continue
+  const luts = new Array(tilesX * tilesY)
+  for (let ty = 0; ty < tilesY; ty += 1) {
+    const y0 = Math.floor(ty * tileH)
+    const y1 = ty === tilesY - 1 ? height : Math.floor((ty + 1) * tileH)
+    for (let tx = 0; tx < tilesX; tx += 1) {
+      const x0 = Math.floor(tx * tileW)
+      const x1 = tx === tilesX - 1 ? width : Math.floor((tx + 1) * tileW)
 
-    let sp = 0
-    stack[sp] = start
-    sp += 1
-    visited[start] = 1
-
-    let area = 0
-    let minX = width
-    let maxX = 0
-    let minY = height
-    let maxY = 0
-    let sumX = 0
-    let sumY = 0
-    const boundary = []
-
-    while (sp > 0) {
-      sp -= 1
-      const idx = stack[sp]
-      const x = idx % width
-      const y = (idx / width) | 0
-
-      area += 1
-      sumX += x
-      sumY += y
-      if (x < minX) minX = x
-      if (x > maxX) maxX = x
-      if (y < minY) minY = y
-      if (y > maxY) maxY = y
-
-      let onBoundary = false
-      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) onBoundary = true
-
-      const left = x > 0 ? idx - 1 : -1
-      const right = x < width - 1 ? idx + 1 : -1
-      const up = y > 0 ? idx - width : -1
-      const down = y < height - 1 ? idx + width : -1
-      for (const nIdx of [left, right, up, down]) {
-        if (nIdx === -1) continue
-        if (!mask[nIdx]) {
-          onBoundary = true
-          continue
-        }
-        if (!visited[nIdx]) {
-          visited[nIdx] = 1
-          stack[sp] = nIdx
-          sp += 1
+      const hist = new Float64Array(256)
+      let count = 0
+      for (let y = y0; y < y1; y += 1) {
+        const row = y * width
+        for (let x = x0; x < x1; x += 1) {
+          hist[Math.max(0, Math.min(255, gray[row + x] | 0))] += 1
+          count += 1
         }
       }
-      if (onBoundary) boundary.push([x, y])
+
+      const clip = Math.max(1, Math.round((clipLimit * count) / 256))
+      let excess = 0
+      for (let b = 0; b < 256; b += 1) {
+        if (hist[b] > clip) {
+          excess += hist[b] - clip
+          hist[b] = clip
+        }
+      }
+      const redistribute = excess / 256
+      for (let b = 0; b < 256; b += 1) hist[b] += redistribute
+
+      const lut = new Float32Array(256)
+      let cdf = 0
+      for (let b = 0; b < 256; b += 1) {
+        cdf += hist[b]
+        lut[b] = count > 0 ? (255 * cdf) / count : b
+      }
+      luts[ty * tilesX + tx] = lut
     }
-
-    components.push({
-      area,
-      perimeter: boundary.length,
-      minX, maxX, minY, maxY,
-      centroidX: sumX / area,
-      centroidY: sumY / area,
-      boundary,
-    })
   }
 
-  return components
-}
+  const out = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    let fy = (y + 0.5) / tileH - 0.5
+    fy = Math.max(0, Math.min(tilesY - 1, fy))
+    const ty0 = Math.floor(fy)
+    const ty1 = Math.min(tilesY - 1, ty0 + 1)
+    const wy = fy - ty0
 
-function convexHullArea(points) {
-  if (points.length < 3) return 0
-  const pts = points.slice().sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]))
-  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    for (let x = 0; x < width; x += 1) {
+      let fx = (x + 0.5) / tileW - 0.5
+      fx = Math.max(0, Math.min(tilesX - 1, fx))
+      const tx0 = Math.floor(fx)
+      const tx1 = Math.min(tilesX - 1, tx0 + 1)
+      const wx = fx - tx0
 
-  const lower = []
-  for (const p of pts) {
-    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop()
-    lower.push(p)
-  }
-  const upper = []
-  for (let i = pts.length - 1; i >= 0; i -= 1) {
-    const p = pts[i]
-    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop()
-    upper.push(p)
-  }
-  const hull = lower.slice(0, -1).concat(upper.slice(0, -1))
-  if (hull.length < 3) return 0
-
-  let area = 0
-  for (let i = 0; i < hull.length; i += 1) {
-    const [x1, y1] = hull[i]
-    const [x2, y2] = hull[(i + 1) % hull.length]
-    area += x1 * y2 - x2 * y1
-  }
-  return Math.abs(area) / 2
-}
-
-// Algebraic (Kasa) least-squares circle fit over x^2+y^2+Dx+Ey+F=0. The
-// blob's own outline traces the rim of the raised dot that cast it --
-// whether that's only a partial arc (a crescent, the highlight/shadow
-// "bite") or the full rim of a filled highlight -- so fitting a circle
-// through those boundary pixels approximates where the dot is centered
-// either way.
-function fitCircle(points) {
-  const n = points.length
-  if (n < 3) return null
-
-  let sumX = 0, sumY = 0, sumXX = 0, sumYY = 0, sumXY = 0
-  let sumXZ = 0, sumYZ = 0, sumZ = 0
-  for (const [x, y] of points) {
-    const z = x * x + y * y
-    sumX += x
-    sumY += y
-    sumXX += x * x
-    sumYY += y * y
-    sumXY += x * y
-    sumXZ += x * z
-    sumYZ += y * z
-    sumZ += z
-  }
-
-  const a11 = sumXX, a12 = sumXY, a13 = sumX
-  const a21 = sumXY, a22 = sumYY, a23 = sumY
-  const a31 = sumX, a32 = sumY, a33 = n
-  const b1 = -sumXZ, b2 = -sumYZ, b3 = -sumZ
-
-  const det = a11 * (a22 * a33 - a23 * a32) - a12 * (a21 * a33 - a23 * a31) + a13 * (a21 * a32 - a22 * a31)
-  if (Math.abs(det) < 1e-9) return null
-
-  const detD = b1 * (a22 * a33 - a23 * a32) - a12 * (b2 * a33 - a23 * b3) + a13 * (b2 * a32 - a22 * b3)
-  const detE = a11 * (b2 * a33 - a23 * b3) - b1 * (a21 * a33 - a23 * a31) + a13 * (a21 * b3 - b2 * a31)
-  const detF = a11 * (a22 * b3 - b2 * a32) - a12 * (a21 * b3 - b2 * a31) + b1 * (a21 * a32 - a22 * a31)
-
-  const D = detD / det
-  const E = detE / det
-  const F = detF / det
-
-  const cx = -D / 2
-  const cy = -E / 2
-  const rSq = cx * cx + cy * cy - F
-  if (rSq <= 0) return null
-  return { cx, cy, r: Math.sqrt(rSq) }
-}
-
-function isDotShaped(component, imageArea) {
-  const { area, perimeter, minX, maxX, minY, maxY, centroidX, centroidY, boundary } = component
-  if (area < MIN_COMPONENT_AREA || area > imageArea * MAX_COMPONENT_AREA_FRACTION) return false
-
-  const bboxWidth = maxX - minX + 1
-  const bboxHeight = maxY - minY + 1
-  const aspect = bboxWidth / bboxHeight
-  if (aspect < MIN_ASPECT_RATIO || aspect > MAX_ASPECT_RATIO) return false
-
-  let maxDist = 0
-  for (const [x, y] of boundary) {
-    const dx = x - centroidX
-    const dy = y - centroidY
-    const dist = Math.sqrt(dx * dx + dy * dy)
-    if (dist > maxDist) maxDist = dist
-  }
-  const radius = Math.max(maxDist, 1)
-  const fillRatio = area / (Math.PI * radius * radius)
-  if (fillRatio < MIN_FILL_RATIO) return false
-
-  const circularity = perimeter > 0 ? (4 * Math.PI * area) / (perimeter * perimeter) : 0
-  if (circularity < MIN_CIRCULARITY) return false
-
-  const hullArea = convexHullArea(boundary)
-  const solidity = hullArea > 0 ? Math.min(1, area / hullArea) : 0
-  if (solidity < MIN_SOLIDITY) return false
-
-  return true
-}
-
-// Downscales onto `canvas` (reused across calls by the caller) and returns
-// the ImageData used for detection, capped at MAX_DETECT_DIMENSION on the
-// long edge to keep flood-fill cost bounded.
-export function sampleForCrescentDetection(source, canvas, sourceWidth, sourceHeight) {
-  const scale = Math.min(1, MAX_DETECT_DIMENSION / Math.max(sourceWidth, sourceHeight))
-  const width = Math.max(1, Math.round(sourceWidth * scale))
-  const height = Math.max(1, Math.round(sourceHeight * scale))
-  canvas.width = width
-  canvas.height = height
-  const ctx = canvas.getContext('2d', { willReadFrequently: true })
-  ctx.drawImage(source, 0, 0, width, height)
-  return ctx.getImageData(0, 0, width, height)
-}
-
-// A printed letter, once the same Otsu split that isolates a dot's
-// highlight/shadow also binarizes the page's ink, is often just as round,
-// filled, and solid as a real dot blob -- "o", "e", "s" all sail through
-// isDotShaped's floors. Shape alone can't tell the two apart. What does:
-// Braille dots always sit on a fixed-pitch grid (dot-to-dot within a cell,
-// cell-to-cell), while stray text blobs land at whatever spacing their
-// neighboring letters happen to have. So with enough candidates to see the
-// pattern, find the dominant nearest-neighbor spacing and keep only the
-// circles that actually participate in it.
-const MIN_CANDIDATES_FOR_GRID_FILTER = 6
-const GRID_PITCH_TOLERANCE = 0.25
-const GRID_PITCH_MULTIPLES = [1, 2, 3]
-
-function nearestNeighborDistances(circles) {
-  return circles.map((c, i) => {
-    let best = Infinity
-    for (let j = 0; j < circles.length; j += 1) {
-      if (j === i) continue
-      const dx = c.cx - circles[j].cx
-      const dy = c.cy - circles[j].cy
-      const d = Math.sqrt(dx * dx + dy * dy)
-      if (d < best) best = d
+      const v = Math.max(0, Math.min(255, gray[y * width + x] | 0))
+      const v00 = luts[ty0 * tilesX + tx0][v]
+      const v01 = luts[ty0 * tilesX + tx1][v]
+      const v10 = luts[ty1 * tilesX + tx0][v]
+      const v11 = luts[ty1 * tilesX + tx1][v]
+      const top = v00 + (v01 - v00) * wx
+      const bottom = v10 + (v11 - v10) * wx
+      out[y * width + x] = top + (bottom - top) * wy
     }
-    return best
-  })
+  }
+  return out
 }
 
-// Mode of the nearest-neighbor distances, via a histogram binned relative
-// to their own median -- real dot pitch dominates the count once there are
-// enough genuine dots, regardless of the page's absolute scale/resolution.
+function localRelativeBrightness(gray, width, height, sigma) {
+  const mean = gaussianBlur(gray, width, height, sigma)
+  const sq = new Float32Array(gray.length)
+  for (let i = 0; i < gray.length; i += 1) sq[i] = gray[i] * gray[i]
+  const meanSq = gaussianBlur(sq, width, height, sigma)
+
+  const out = new Float32Array(gray.length)
+  const clip = LOCAL_BRIGHTNESS_CLIP_STD
+  for (let i = 0; i < gray.length; i += 1) {
+    const variance = Math.max(0, meanSq[i] - mean[i] * mean[i])
+    const std = Math.sqrt(variance)
+    let z = std > LOCAL_BRIGHTNESS_MIN_STD ? (gray[i] - mean[i]) / std : 0
+    if (z > clip) z = clip
+    else if (z < -clip) z = -clip
+    out[i] = ((z + clip) / (2 * clip)) * 255
+  }
+  return out
+}
+
+function gaussianBlur(gray, width, height, sigma) {
+  const radius = Math.max(1, Math.ceil(sigma * 3))
+  const kernel = new Float32Array(radius * 2 + 1)
+  let sum = 0
+  for (let i = -radius; i <= radius; i += 1) {
+    const v = Math.exp(-(i * i) / (2 * sigma * sigma))
+    kernel[i + radius] = v
+    sum += v
+  }
+  for (let i = 0; i < kernel.length; i += 1) kernel[i] /= sum
+
+  const tmp = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width
+    for (let x = 0; x < width; x += 1) {
+      let acc = 0
+      for (let k = -radius; k <= radius; k += 1) {
+        const sx = Math.max(0, Math.min(width - 1, x + k))
+        acc += gray[row + sx] * kernel[k + radius]
+      }
+      tmp[row + x] = acc
+    }
+  }
+  const out = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let acc = 0
+      for (let k = -radius; k <= radius; k += 1) {
+        const sy = Math.max(0, Math.min(height - 1, y + k))
+        acc += tmp[sy * width + x] * kernel[k + radius]
+      }
+      out[y * width + x] = acc
+    }
+  }
+  return out
+}
+
+function sobelGradient(gray, width, height) {
+  const gx = new Float32Array(width * height)
+  const gy = new Float32Array(width * height)
+  const mag = new Float32Array(width * height)
+
+  for (let y = 0; y < height; y += 1) {
+    const y0 = Math.max(0, y - 1)
+    const y1 = Math.min(height - 1, y + 1)
+    for (let x = 0; x < width; x += 1) {
+      const x0 = Math.max(0, x - 1)
+      const x1 = Math.min(width - 1, x + 1)
+
+      const tl = gray[y0 * width + x0], tc = gray[y0 * width + x], tr = gray[y0 * width + x1]
+      const ml = gray[y * width + x0], mr = gray[y * width + x1]
+      const bl = gray[y1 * width + x0], bc = gray[y1 * width + x], br = gray[y1 * width + x1]
+
+      const sx = (tr + 2 * mr + br) - (tl + 2 * ml + bl)
+      const sy = (bl + 2 * bc + br) - (tl + 2 * tc + tr)
+      const idx = y * width + x
+      gx[idx] = sx
+      gy[idx] = sy
+      mag[idx] = Math.sqrt(sx * sx + sy * sy)
+    }
+  }
+  return { gx, gy, mag }
+}
+
+function bilinearSample(field, width, height, x, y) {
+  const cx = Math.max(0, Math.min(width - 1.001, x))
+  const cy = Math.max(0, Math.min(height - 1.001, y))
+  const x0 = Math.floor(cx), y0 = Math.floor(cy)
+  const x1 = x0 + 1, y1 = y0 + 1
+  const wx = cx - x0, wy = cy - y0
+  const v00 = field[y0 * width + x0]
+  const v01 = field[y0 * width + x1]
+  const v10 = field[y1 * width + x0]
+  const v11 = field[y1 * width + x1]
+  const top = v00 + (v01 - v00) * wx
+  const bottom = v10 + (v11 - v10) * wx
+  return top + (bottom - top) * wy
+}
+
+function nonMaxSuppress(mag, gx, gy, width, height) {
+  const out = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = y * width + x
+      const m = mag[idx]
+      if (m === 0) continue
+      const ux = gx[idx] / m
+      const uy = gy[idx] / m
+      const ahead = bilinearSample(mag, width, height, x + ux, y + uy)
+      const behind = bilinearSample(mag, width, height, x - ux, y - uy)
+      if (m >= ahead && m >= behind) out[idx] = m
+    }
+  }
+  return out
+}
+
 function estimateGridPitch(nnDistances) {
   const finite = nnDistances.filter((d) => Number.isFinite(d)).sort((a, b) => a - b)
   if (finite.length === 0) return null
@@ -337,6 +278,54 @@ function estimateGridPitch(nnDistances) {
   return bestKey === null ? null : bestKey * bucketSize
 }
 
+function nearestNeighborDistances(circles) {
+  return circles.map((c, i) => {
+    let best = Infinity
+    for (let j = 0; j < circles.length; j += 1) {
+      if (j === i) continue
+      const dx = c.cx - circles[j].cx
+      const dy = c.cy - circles[j].cy
+      const d = Math.sqrt(dx * dx + dy * dy)
+      if (d < best) best = d
+    }
+    return best
+  })
+}
+
+const MIN_CANDIDATES_FOR_RADIUS_FILTER = 4
+const RADIUS_MODE_TOLERANCE = 0.35
+
+function filterToRadiusMode(circles) {
+  if (circles.length < MIN_CANDIDATES_FOR_RADIUS_FILTER) return circles
+
+  const radii = circles.map((c) => c.r).sort((a, b) => a - b)
+  const median = radii[Math.floor(radii.length / 2)]
+  const bucketSize = Math.max(1, median * 0.25)
+
+  const weights = new Map()
+  for (const c of circles) {
+    const key = Math.round(c.r / bucketSize)
+    weights.set(key, (weights.get(key) || 0) + c.score)
+  }
+  let bestKey = null
+  let bestWeight = 0
+  for (const [key, weight] of weights) {
+    if (weight > bestWeight) {
+      bestWeight = weight
+      bestKey = key
+    }
+  }
+  if (bestKey === null) return circles
+  const modeRadius = bestKey * bucketSize
+
+  const kept = circles.filter((c) => Math.abs(c.r - modeRadius) <= modeRadius * RADIUS_MODE_TOLERANCE)
+  return kept.length > 0 ? kept : circles
+}
+
+const MIN_CANDIDATES_FOR_GRID_FILTER = 6
+const GRID_PITCH_TOLERANCE = 0.25
+const GRID_PITCH_MULTIPLES = [1, 2, 3]
+
 function filterToGrid(circles) {
   if (circles.length < MIN_CANDIDATES_FOR_GRID_FILTER) return circles
 
@@ -352,34 +341,238 @@ function filterToGrid(circles) {
     return false
   })
 
-  // A weak/absent pattern (e.g. a handful of real dots with no repetition
-  // yet) shouldn't make detection strictly worse than not filtering at all.
   return kept.length > 0 ? kept : circles
 }
 
-// Finds blobs in `imageData` shaped like a Braille dot's highlight/shadow
-// (crescent or filled), checking both polarities (bright blob on dark
-// ground, and dark blob on bright ground), and fits a circle to each one's
-// outline -- the caller's estimate of where the embossed dot underneath it
-// is actually centered.
-export function detectCrescentCircles(imageData) {
-  const { data, width, height } = imageData
-  const gray = stretchContrast(toGrayscale(data, width, height))
-  const threshold = otsuThreshold(gray)
-  const imageArea = width * height
+const PROFILE_RADIUS_BINS = 5
+const PROFILE_ANGLE_SAMPLES = 16
+const PROFILE_MAX_RADIUS_MULTIPLE = 1.3
 
-  const circles = []
-  for (const polarity of [1, 0]) {
-    const mask = new Uint8Array(imageArea)
-    for (let i = 0; i < gray.length; i += 1) {
-      mask[i] = (polarity ? gray[i] > threshold : gray[i] <= threshold) ? 1 : 0
+function sampleRadialProfile(relative, width, height, cx, cy, r) {
+  const profile = new Float32Array(PROFILE_RADIUS_BINS)
+  for (let bin = 0; bin < PROFILE_RADIUS_BINS; bin += 1) {
+    const frac = (bin + 0.5) / PROFILE_RADIUS_BINS
+    const sampleR = frac * r * PROFILE_MAX_RADIUS_MULTIPLE
+    let sum = 0
+    for (let a = 0; a < PROFILE_ANGLE_SAMPLES; a += 1) {
+      const theta = (a / PROFILE_ANGLE_SAMPLES) * Math.PI * 2
+      const sx = cx + Math.cos(theta) * sampleR
+      const sy = cy + Math.sin(theta) * sampleR
+      sum += bilinearSample(relative, width, height, sx, sy)
     }
-    const components = findComponents(mask, width, height)
-    for (const component of components) {
-      if (!isDotShaped(component, imageArea)) continue
-      const circle = fitCircle(component.boundary)
-      if (circle) circles.push(circle)
+    profile[bin] = sum / PROFILE_ANGLE_SAMPLES
+  }
+  return profile
+}
+
+function normalizeProfileShape(profile) {
+  let mean = 0
+  for (let i = 0; i < profile.length; i += 1) mean += profile[i]
+  mean /= profile.length
+
+  const centered = new Float32Array(profile.length)
+  let normSq = 0
+  for (let i = 0; i < profile.length; i += 1) {
+    centered[i] = profile[i] - mean
+    normSq += centered[i] * centered[i]
+  }
+  const norm = Math.sqrt(normSq)
+  if (norm < 1e-6) return null
+  for (let i = 0; i < centered.length; i += 1) centered[i] /= norm
+  return centered
+}
+
+function dot(a, b) {
+  let sum = 0
+  for (let i = 0; i < a.length; i += 1) sum += a[i] * b[i]
+  return sum
+}
+
+const MIN_CANDIDATES_FOR_PROFILE_FILTER = 4
+const PROFILE_SIMILARITY_THRESHOLD = 0.05
+
+function filterByLightProfile(circles, relative, width, height) {
+  if (circles.length < MIN_CANDIDATES_FOR_PROFILE_FILTER) return circles
+
+  const profiles = circles.map((c) =>
+    normalizeProfileShape(sampleRadialProfile(relative, width, height, c.cx, c.cy, c.r))
+  )
+
+  const template = new Float32Array(PROFILE_RADIUS_BINS)
+  let counted = 0
+  for (const p of profiles) {
+    if (!p) continue
+    for (let i = 0; i < PROFILE_RADIUS_BINS; i += 1) template[i] += p[i]
+    counted += 1
+  }
+  if (counted < MIN_CANDIDATES_FOR_PROFILE_FILTER) return circles
+
+  let templateNormSq = 0
+  for (let i = 0; i < PROFILE_RADIUS_BINS; i += 1) templateNormSq += template[i] * template[i]
+  if (templateNormSq < 1e-6) return circles
+  const templateNorm = Math.sqrt(templateNormSq)
+  for (let i = 0; i < PROFILE_RADIUS_BINS; i += 1) template[i] /= templateNorm
+
+  const kept = circles.filter((circle, i) => {
+    const p = profiles[i]
+    return p !== null && dot(p, template) >= PROFILE_SIMILARITY_THRESHOLD
+  })
+
+  return kept.length > 0 ? kept : circles
+}
+
+function houghCircleVote(mag, gx, gy, width, height, { minRadius, maxRadius, dp, edgeThreshold }) {
+  const accW = Math.max(1, Math.round(width / dp))
+  const accH = Math.max(1, Math.round(height / dp))
+  const radii = []
+  for (let r = minRadius; r <= maxRadius; r += 1) radii.push(r)
+  const numR = radii.length
+
+  const acc = new Uint32Array(accW * accH * numR)
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const idx = y * width + x
+      const m = mag[idx]
+      if (m < edgeThreshold) continue
+      const ux = gx[idx] / m
+      const uy = gy[idx] / m
+
+      for (let ri = 0; ri < numR; ri += 1) {
+        const r = radii[ri]
+        for (let sign = -1; sign <= 1; sign += 2) {
+          const cx = x + sign * ux * r
+          const cy = y + sign * uy * r
+          const ax = Math.round(cx / dp)
+          const ay = Math.round(cy / dp)
+          if (ax < 0 || ax >= accW || ay < 0 || ay >= accH) continue
+          acc[(ay * accW + ax) * numR + ri] += 1
+        }
+      }
     }
   }
-  return filterToGrid(circles)
+
+  const pooled = new Uint32Array(accW * accH * numR)
+  for (let ay = 0; ay < accH; ay += 1) {
+    for (let ax = 0; ax < accW; ax += 1) {
+      const base = (ay * accW + ax) * numR
+      for (let ny = Math.max(0, ay - 1); ny <= Math.min(accH - 1, ay + 1); ny += 1) {
+        for (let nx = Math.max(0, ax - 1); nx <= Math.min(accW - 1, ax + 1); nx += 1) {
+          const nbase = (ny * accW + nx) * numR
+          for (let ri = 0; ri < numR; ri += 1) pooled[base + ri] += acc[nbase + ri]
+        }
+      }
+    }
+  }
+
+  const bestCount = new Float32Array(accW * accH)
+  const bestFraction = new Float32Array(accW * accH)
+  const bestRadius = new Float32Array(accW * accH)
+  for (let cell = 0; cell < accW * accH; cell += 1) {
+    let best = 0
+    let bestR = minRadius
+    let bestFrac = 0
+    const base = cell * numR
+    for (let ri = 0; ri < numR; ri += 1) {
+      const count = pooled[base + ri]
+      if (count < MIN_RING_VOTES_ABSOLUTE) continue
+      const r = radii[ri]
+      const fraction = count / (2 * Math.PI * r)
+      if (fraction < MIN_RING_SUPPORT) continue
+      if (count > best) {
+        best = count
+        bestR = r
+        bestFrac = fraction
+      }
+    }
+    bestCount[cell] = best
+    bestFraction[cell] = bestFrac
+    bestRadius[cell] = bestR
+  }
+
+  return { accW, accH, bestCount, bestFraction, bestRadius }
+}
+
+function findCircleCenters(bestCount, bestFraction, bestRadius, accW, accH, dp, { minDist }) {
+  const candidates = []
+  for (let ay = 0; ay < accH; ay += 1) {
+    for (let ax = 0; ax < accW; ax += 1) {
+      const count = bestCount[ay * accW + ax]
+      if (count <= 0) continue
+      candidates.push({ ax, ay, count, fraction: bestFraction[ay * accW + ax], r: bestRadius[ay * accW + ax] })
+    }
+  }
+  candidates.sort((a, b) => b.count - a.count)
+
+  const accepted = []
+  const minDistSq = minDist * minDist
+  for (const candidate of candidates) {
+    const cx = candidate.ax * dp
+    const cy = candidate.ay * dp
+    let tooClose = false
+    for (const kept of accepted) {
+      const dx = kept.cx - cx
+      const dy = kept.cy - cy
+      if (dx * dx + dy * dy < minDistSq) {
+        tooClose = true
+        break
+      }
+    }
+    if (!tooClose) accepted.push({ cx, cy, r: candidate.r, score: candidate.count })
+  }
+  return accepted
+}
+
+export function sampleForCrescentDetection(source, canvas, sourceWidth, sourceHeight) {
+  const scale = Math.min(1, MAX_DETECT_DIMENSION / Math.max(sourceWidth, sourceHeight))
+  const width = Math.max(1, Math.round(sourceWidth * scale))
+  const height = Math.max(1, Math.round(sourceHeight * scale))
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  ctx.drawImage(source, 0, 0, width, height)
+  return ctx.getImageData(0, 0, width, height)
+}
+
+export function detectCrescentCircles(imageData) {
+  const { data, width, height } = imageData
+  const gray = toGrayscale(data, width, height)
+  const short = Math.min(width, height)
+
+  const minRadius = Math.max(3, Math.round(short * MIN_RADIUS_FRACTION))
+  const maxRadius = Math.max(minRadius + 2, Math.round(short * MAX_RADIUS_FRACTION))
+
+  const tilesX = Math.max(3, Math.round(width / (CLAHE_TILE_RADIUS_MULTIPLE * maxRadius)))
+  const tilesY = Math.max(3, Math.round(height / (CLAHE_TILE_RADIUS_MULTIPLE * maxRadius)))
+  const equalized = clahe(gray, width, height, tilesX, tilesY, CLAHE_CLIP_LIMIT)
+  const relative = localRelativeBrightness(
+    equalized,
+    width,
+    height,
+    maxRadius * LOCAL_BRIGHTNESS_SIGMA_RADIUS_MULTIPLE
+  )
+  const blurred = gaussianBlur(relative, width, height, GRADIENT_BLUR_SIGMA)
+
+  const { gx, gy, mag } = sobelGradient(blurred, width, height)
+  const edgeThreshold = otsuThreshold(stretchContrast(mag))
+  let magMax = 0
+  for (let i = 0; i < mag.length; i += 1) if (mag[i] > magMax) magMax = mag[i]
+  const scaledEdgeThreshold = magMax > 0 ? (edgeThreshold / 255) * magMax : 0
+  const thinned = nonMaxSuppress(mag, gx, gy, width, height)
+
+  const dp = Math.min(MAX_ACCUMULATOR_DP, Math.max(MIN_ACCUMULATOR_DP, ACCUMULATOR_DP_RADIUS_CONSTANT / maxRadius))
+  const { accW, accH, bestCount, bestFraction, bestRadius } = houghCircleVote(thinned, gx, gy, width, height, {
+    minRadius,
+    maxRadius,
+    dp,
+    edgeThreshold: scaledEdgeThreshold,
+  })
+
+  const circles = findCircleCenters(bestCount, bestFraction, bestRadius, accW, accH, dp, {
+    minDist: maxRadius * MIN_DIST_RADIUS_MULTIPLE,
+  })
+
+  const shapeFiltered = filterToGrid(filterToRadiusMode(circles))
+  const lightFiltered = filterByLightProfile(shapeFiltered, relative, width, height)
+  return lightFiltered.map(({ cx, cy, r }) => ({ cx, cy, r }))
 }

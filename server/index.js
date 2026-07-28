@@ -9,8 +9,6 @@ import { fileURLToPath } from 'node:url'
 const WIFI_IFACE = 'wlan1'
 const PORT = process.env.WIFI_SERVER_PORT || 3001
 
-// Resolved from this file's location (not process.cwd()) so it's stable
-// regardless of which directory `npm run dev`/`npm run server` is launched from.
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url))
 const IMAGES_DIR = path.join(SERVER_DIR, '..', 'raspimages')
 const OUTPUT_DIR = path.join(SERVER_DIR, '..', 'output')
@@ -21,38 +19,14 @@ const DISTANCE_SCRIPT = path.join(SERVER_DIR, 'distance.py')
 const DISTANCE_TIMEOUT_MS = 2500
 const DISTANCE_EMA_WEIGHT = 0.92
 let lastDistanceOutputCm = null
-// Keep in sync with idealFocalDistanceCm in src/App.jsx and FOCAL_DISTANCE_CM
-// in lcd.py. This tolerance is tighter than lcd.py's FOCAL_TOLERANCE_CM (1cm,
-// just for the "move closer/farther" hint) -- a still only gets kept for the
-// scan if it's close enough to the focal plane to plausibly be in focus.
 const FOCAL_DISTANCE_CM = 4.8
 const IMAGE_SAVE_DISTANCE_TOLERANCE_CM = 1.5
-// Sharpness is computed client-side (browser canvas + JS, see
-// CameraStream.jsx) instead of via a server-side cv2 subprocess -- the
-// browser has CPU to spare and the Pi doesn't, which is exactly what the
-// earlier cv2-subprocess approach kept running into. The browser POSTs its
-// reading here and lcd.py/the web UI both just read back whatever was last
-// reported.
-//
-// This is only used for the live "Sharpness" readout and the LCD's blur
-// hint -- it is NOT used to gate which stills get saved (see the capture
-// loop below). A live 160x120 downsample of a compressed MJPEG frame is a
-// noisy sharpness estimate, and gating capture on top of the distance check
-// made the two conditions rarely align at once, so a scan's still count
-// would sit stuck at 0 even with the surface correctly in range. Sharpness
-// filtering instead happens once, client-side, against the full-resolution
-// saved stills when "Compile 3D model" is pressed (see App.jsx).
 const SHARPNESS_REPORT_STALE_MS = 5000
 let lastSharpnessReport = null
 
-// Wipe stills left over from the previous session so a fresh boot always
-// starts a scan from an empty raspimages/ -- otherwise old frames would get
-// mixed into (or mistaken for) the next scan.
 await fs.rm(IMAGES_DIR, { recursive: true, force: true })
 await fs.mkdir(IMAGES_DIR, { recursive: true })
 
-// Raspberry Pi OS renamed libcamera-apps to rpicam-apps in late 2023;
-// try the modern binaries first and fall back for older installs.
 const CAMERA_LIST_BINARIES = ['rpicam-hello', 'libcamera-hello']
 const CAMERA_VIDEO_BINARY_FOR = {
   'rpicam-hello': 'rpicam-vid',
@@ -67,12 +41,6 @@ const cameraStats = {
   frameTimestamps: [],
 }
 
-// Only one rpicam-vid/libcamera-vid process can hold the camera device at a
-// time. Without this, quickly retoggling idle->live spawns a new process
-// before the old one has released the hardware, so the new stream fails to
-// acquire the camera -- the CameraStream <img> errors out and everything
-// downstream that gates on "is streaming" (distance/sharpness polling)
-// looks like it silently stopped.
 let cameraReleased = Promise.resolve()
 async function waitForCameraRelease() {
   await Promise.race([
@@ -86,9 +54,6 @@ app.use(express.json({ limit: '10kb' }))
 
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
-    // execFile never spawns a shell, so args are passed as literal argv
-    // entries to the target binary -- untrusted ssid/password values can't
-    // break out into shell metacharacters the way they could with exec().
     execFile(cmd, args, { timeout: 20000 }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(stderr?.trim() || err.message))
@@ -99,25 +64,16 @@ function run(cmd, args) {
   })
 }
 
-// nmcli needs root to scan/connect on most systems (NetworkManager's polkit
-// rules don't grant this to the "pi" user by default). `-n` refuses to
-// prompt for a password since Node has no attached tty -- see the
-// NOPASSWD sudoers rule in SETUP_COMMANDS.txt.
 function runNmcli(args) {
   return run('sudo', ['-n', 'nmcli', ...args])
 }
 
-// Surfaces the same "passwordless sudo isn't configured" hint the Admin
-// menu uses instead of the raw, confusing sudo stderr.
 function friendlySudoMessage(err) {
   return /password is required|no tty present/i.test(err.message)
     ? `${err.message} — passwordless sudo isn't configured for nmcli. See "PERMISIUNI ADMIN" in SETUP_COMMANDS.txt.`
     : err.message
 }
 
-// Like run(), but with no output-buffer limit and a much longer timeout --
-// stitching a batch of images can take far longer than the 20s budget used
-// for quick system commands, especially on Pi-class hardware.
 function runLong(cmd, args, timeoutMs) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args)
@@ -152,7 +108,6 @@ app.get('/api/wifi/interface', async (_req, res) => {
   }
 })
 
-// nmcli terse output escapes literal ':' inside a field as '\:'
 function parseTerseLine(line) {
   const fields = []
   let current = ''
@@ -279,7 +234,6 @@ async function detectCamera() {
         return { available: true, videoBinary: CAMERA_VIDEO_BINARY_FOR[listBinary] }
       }
     } catch {
-      // binary missing or probe failed; try the next known tool name
     }
   }
   return { available: false, videoBinary: null }
@@ -386,18 +340,6 @@ app.get('/api/camera/stream', async (req, res) => {
         cameraStats.frameTimestamps.shift()
       }
 
-      // Persist a still every IMAGE_SAVE_INTERVAL_MS so a scan pass builds up
-      // a manageable set of frames in ./raspimages instead of flooding disk
-      // at the full stream framerate. Writes are serialized (never more than
-      // one in flight) -- firing a new writeFile every second regardless of
-      // whether the previous one finished let writes pile up whenever the SD
-      // card fell behind, and they'd all land at once in a laggy burst.
-      //
-      // Only the write itself is throttled to that interval, not the gate
-      // check below -- distance/sharpness are just cheap reads of already-
-      // cached values, so re-checking on every incoming frame means a still
-      // gets grabbed the instant the surface comes into range instead of up
-      // to a second late.
       if (!imageSaveInFlight && now - lastImageSavedAt >= IMAGE_SAVE_INTERVAL_MS) {
         const inFocalRange = lastDistanceOutputCm != null
           && Math.abs(lastDistanceOutputCm - FOCAL_DISTANCE_CM) < IMAGE_SAVE_DISTANCE_TOLERANCE_CM
@@ -407,10 +349,6 @@ app.get('/api/camera/stream', async (req, res) => {
           imageSaveInFlight = true
           const filename = `img-${now}.jpg`
           fs.writeFile(path.join(IMAGES_DIR, filename), frame)
-            // Errors here used to vanish silently, so a stuck image counter
-            // gave no clue whether frames just weren't arriving or writes
-            // were actually failing (e.g. disk pressure) -- log so that
-            // distinction shows up in the service's journal.
             .catch((err) => console.error(`Failed to save ${filename}:`, err.message))
             .finally(() => { imageSaveInFlight = false })
         }
@@ -428,10 +366,6 @@ async function listSavedImages() {
   try {
     entries = await fs.readdir(IMAGES_DIR, { withFileTypes: true })
   } catch (err) {
-    // Used to fail silently, so a stuck "0 stored images" counter gave no
-    // clue whether stills genuinely weren't being saved or this listing
-    // itself couldn't see them (wrong path, permissions, dir removed out
-    // from under it) -- log so that distinction shows up in the journal.
     console.error('Failed to list saved images:', err.message)
     return []
   }
@@ -446,8 +380,6 @@ app.get('/api/images/count', async (_req, res) => {
   res.json({ count: names.length })
 })
 
-// Reads every saved still from ./raspimages and sends it to the client in
-// one response, ahead of the (placeholder) 3D reconstruction step.
 app.get('/api/images', async (_req, res) => {
   const names = await listSavedImages()
   const images = await Promise.all(names.map(async (name) => {
@@ -457,10 +389,6 @@ app.get('/api/images', async (_req, res) => {
   res.json({ count: images.length, images })
 })
 
-// Called once the client has fetched every raw still for a compile pass --
-// clears raspimages/ so the next scan (and the "Stored images" counter)
-// starts from zero instead of mixing in stills the client already
-// processed. Mirrors the wipe done at server boot.
 app.delete('/api/images', async (_req, res) => {
   try {
     await fs.rm(IMAGES_DIR, { recursive: true, force: true })
@@ -471,8 +399,6 @@ app.delete('/api/images', async (_req, res) => {
   }
 })
 
-// Raspberry Pi OS ships python3 only; some dev machines still expose plain
-// "python" for a Python 3 install, so try both rather than hardcoding one.
 const PYTHON_BINARIES = ['python3', 'python']
 
 async function listOutputImages() {
@@ -488,8 +414,6 @@ async function listOutputImages() {
     .sort()
 }
 
-// Reads every stitched piece compile.py wrote to ./output and sends it to
-// the client in one response, so the "view results" menu can render them.
 app.get('/api/output/images', async (_req, res) => {
   const names = await listOutputImages()
   const images = await Promise.all(names.map(async (name) => {
@@ -541,17 +465,6 @@ async function runPythonJson(script, timeoutMs) {
   throw lastErr
 }
 
-// Both the web UI and lcd.py poll /api/distance on their own timers at the
-// same cadence, so their requests regularly land close together without
-// actually overlapping. Coalescing alone only merges calls that are truly
-// in-flight at the same instant -- two callers a few hundred ms out of phase
-// still spawn their own subprocess. On a Pi 3 A+ (512MB RAM), two
-// GPIO-contending distance.py runs every poll cycle is real, sustained
-// CPU/memory pressure (visible as python3 and kswapd0 usage while the camera
-// stream is also competing for the CPU), so on top of coalescing the
-// in-flight case, cache the last result for slightly under the shared poll
-// interval -- any caller within that window gets the still-fresh cached
-// reading instead of forcing a second subprocess spawn.
 function coalesce(fn, cacheTtlMs = 0) {
   let inFlight = null
   let cachedAt = 0
@@ -573,16 +486,8 @@ function coalesce(fn, cacheTtlMs = 0) {
   }
 }
 
-// Kept comfortably under the shared 500ms poll interval so a caller never
-// sees a reading older than one poll cycle -- this only absorbs the
-// redundant second subprocess spawn, not the actual refresh rate.
 const readDistance = coalesce(() => runPythonJson(DISTANCE_SCRIPT, DISTANCE_TIMEOUT_MS), 400)
 
-// Distance is read from an HC-SR04 (TRIG on board pin 29, ECHO on pin 31)
-// via a short-lived Python helper -- Node has no first-party GPIO access.
-// distance.py takes 4 readings per call (in the time one used to take) and
-// returns their average; here that average is blended with the last output
-// (92% new / 8% previous) so the UI sees a smoothed value each poll.
 app.get('/api/distance', async (_req, res) => {
   try {
     const data = await readDistance()
@@ -600,12 +505,6 @@ function isFiniteInRange(value, min, max) {
   return typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max
 }
 
-// The browser computes blur/sharpness itself (Laplacian-variance over a
-// downsampled canvas grab of the live frame, see CameraStream.jsx) and
-// reports it here once a second. This replaces spawning sharpness.py per
-// poll -- cv2's import was slow and CPU-heavy enough on Pi-class hardware
-// to compete with the camera stream for the same resources; the browser has
-// no such constraint.
 app.post('/api/sharpness', (req, res) => {
   const { sharpness, sharpnessPercent, blurry } = req.body ?? {}
   if (!isFiniteInRange(sharpnessPercent, 0, 100) || typeof blurry !== 'boolean') {
@@ -752,8 +651,6 @@ app.post('/api/system/command', async (req, res) => {
     const stdout = await run(entry.cmd, entry.args)
     res.json({ success: true, output: stdout.trim() })
   } catch (err) {
-    // `sudo -n` refuses to prompt for a password; on a Pi without the
-    // NOPASSWD rule from SETUP_COMMANDS.txt this is the failure every time.
     const message = /password is required|no tty present/i.test(err.message)
       ? `${err.message} — passwordless sudo isn't configured for this command. See "PERMISIUNI ADMIN" in SETUP_COMMANDS.txt.`
       : err.message

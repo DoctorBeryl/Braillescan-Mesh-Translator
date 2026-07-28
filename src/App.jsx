@@ -35,8 +35,6 @@ const headerCaptions = {
 }
 const translationSampleText = 'Hello, welcome to the Pi Translator.'
 const idealFocalDistanceCm = 4.8
-// Matches the user-facing "sharpness of each image to be more than 55%"
-// requirement for which captured stills make it into the compiled zip.
 const COMPILE_MIN_SHARPNESS_PERCENT = 55
 const ADMIN_USERNAME = 'admin'
 const ADMIN_PASSWORD = 'password'
@@ -271,10 +269,6 @@ function App() {
     }
   }, [targetLang, showTranslation])
 
-  // Sharpness is computed client-side by CameraStream (Laplacian variance
-  // over a canvas grab of the live frame, once a second) and reported here
-  // directly via a callback -- no server round-trip needed for the web UI's
-  // own display, since this browser is the one that just computed it.
   const handleSharpness = useCallback(({ sharpnessPercent }) => {
     setSharpness(typeof sharpnessPercent === 'number' ? sharpnessPercent : null)
   }, [])
@@ -299,9 +293,6 @@ function App() {
         })
     }
     poll()
-    // 500ms, matching lcd.py's SCAN_POLL_INTERVAL_S -- polling much faster
-    // than the sensor script itself can reliably complete just causes
-    // overlapping distance.py invocations to contend for the same GPIO pins.
     const interval = setInterval(poll, 500)
     return () => {
       cancelled = true
@@ -441,14 +432,6 @@ function App() {
       }
   const scaleStyle = { fontSize: `${textPercent}%` }
 
-  // Pulls every raw still off the Pi and does the whole "which frames are
-  // usable" pipeline right here in the browser: a sharp-enough check (same
-  // Laplacian-variance metric CameraStream's live readout uses, just run
-  // against the full saved still instead of a live low-res sample), then a
-  // crescent-shape check for the embossed-dot highlight/shadow pattern (see
-  // src/lib/crescentDetect.js). Frames that pass both get zipped and pushed
-  // to the browser as a download -- there's no server-side reconstruction
-  // step for this anymore, the Pi's only job was capturing the stills.
   const handleCompile = async () => {
     setCompiling(true)
     setCompileError('')
@@ -467,8 +450,6 @@ function App() {
         const image = allImages[i]
         setCompileStatus(`Checking image ${i + 1} of ${allImages.length}…`)
 
-        // Awaited one at a time (not Promise.all) so every still can reuse
-        // the same canvas instead of decoding dozens of frames in parallel.
         const img = new Image()
         await new Promise((resolve, reject) => {
           img.onload = resolve
@@ -483,9 +464,6 @@ function App() {
         const circles = detectCrescentCircles(detectionData)
         if (circles.length < MIN_CRESCENTS_REQUIRED) continue
 
-        // Mark each detected dot's estimated center on the full-resolution
-        // still, scaling up from the downscaled detection canvas, so the
-        // zipped image lets a human sanity-check the detector's calls.
         const scaleX = img.naturalWidth / detectionData.width
         const scaleY = img.naturalHeight / detectionData.height
         markupCanvas.width = img.naturalWidth
@@ -513,9 +491,6 @@ function App() {
         downloadBlob(zipBlob, `braille-scan-${Date.now()}.zip`)
       }
 
-      // Every still has now been read into the browser -- clear the Pi's
-      // copy so the "Stored images" counter (and the next scan) starts
-      // fresh instead of mixing in frames this pass already processed.
       await fetch('/api/images', { method: 'DELETE' }).catch(() => {})
     } catch (err) {
       setCompileError(err.message || 'Compile failed.')

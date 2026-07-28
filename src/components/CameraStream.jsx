@@ -27,14 +27,6 @@ function CameraStream({ tone, themePalette, checked, available, onStreamingChang
     setStreamingState(true)
   }
 
-  // The Pi is the source of truth for whether the camera is actually
-  // live (it's the one holding the rpicam-vid process). Reconcile once
-  // against that on the first real /api/camera/stats response -- e.g. a
-  // page reload should show "Live" immediately if the camera was already
-  // streaming, rather than defaulting to idle until someone re-toggles it.
-  // Only the initial sync auto-drives the toggle; afterwards the button and
-  // stream errors are what update `streaming`, so this doesn't fight a
-  // manual toggle click against a stale poll response.
   useEffect(() => {
     if (syncedFromServer.current || serverStreaming == null) return
     syncedFromServer.current = true
@@ -43,7 +35,6 @@ function CameraStream({ tone, themePalette, checked, available, onStreamingChang
       setStreamKey((value) => value + 1)
       setStreamingState(true)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverStreaming])
 
   const handleStreamError = () => {
@@ -51,19 +42,11 @@ function CameraStream({ tone, themePalette, checked, available, onStreamingChang
     setStreamError('Lost connection to the camera stream.')
   }
 
-  // App re-renders roughly every 500ms while streaming (distance polling),
-  // which would recreate an inline onSharpness prop each time -- kept in a
-  // ref so the analysis effect below can depend on `streaming` alone instead
-  // of tearing down and rebuilding its interval on every parent render.
   const onSharpnessRef = useRef(onSharpness)
   useEffect(() => {
     onSharpnessRef.current = onSharpness
   }, [onSharpness])
 
-  // Computes blur/sharpness on the client (see src/lib/sharpness.js)
-  // instead of asking the Pi to run cv2 on its own CPU, then reports it to
-  // the server so lcd.py's display and the rest of the web UI can both read
-  // it back from /api/sharpness.
   useEffect(() => {
     if (!streaming) return
 

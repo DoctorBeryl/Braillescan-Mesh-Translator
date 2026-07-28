@@ -62,7 +62,6 @@ function WifiPanel({ open, onClose, theme, themePalette, tone }) {
     return () => {
       cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
   const selectNetwork = (network) => {

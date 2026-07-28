@@ -23,6 +23,20 @@ const ARC_SECTORS = 16
 // same accumulator cell from different angles - this requires the winning fraction
 // to come from one unbroken arc, not a scattered union, to tell the two apart.
 const MIN_ARC_SECTORS = 4
+const EDGE_TILE_RADIUS_MULTIPLE = 6
+// A single global edge threshold lets a handful of strong, unrelated edges (the
+// paper's own boundary, printed ink strokes) set the bar for the whole photo, so a
+// dimmer patch of the same paper - a shadow, a tinted overlay - never clears it even
+// though its crescents are the strongest local structure in their own neighborhood.
+// The floor keeps a per-tile threshold from collapsing to near zero in a tile that
+// has little real edge content, which would otherwise let plain sensor noise start
+// forming phantom rings.
+const EDGE_THRESHOLD_FLOOR_FRACTION = 0.3
+// Below this local-brightness std, localRelativeBrightness's z-score division is
+// amplifying noise rather than reading real tonal variation (see
+// localEdgeThreshold). Chosen well above LOCAL_BRIGHTNESS_MIN_STD (0.75) so the
+// unreliable band around that division cliff is excluded, not just its exact edge.
+const RELIABLE_STD_REFERENCE = 3.0
 
 function toGrayscale(data, width, height) {
   const gray = new Float32Array(width * height)
@@ -47,12 +61,7 @@ function stretchContrast(gray) {
   return out
 }
 
-function otsuThreshold(gray) {
-  const hist = new Array(256).fill(0)
-  for (let i = 0; i < gray.length; i += 1) {
-    hist[Math.max(0, Math.min(255, gray[i] | 0))] += 1
-  }
-  const total = gray.length
+function otsuFromHistogram(hist, total) {
   let sum = 0
   for (let t = 0; t < 256; t += 1) sum += t * hist[t]
 
@@ -75,6 +84,107 @@ function otsuThreshold(gray) {
     }
   }
   return best
+}
+
+function otsuThreshold(gray) {
+  const hist = new Array(256).fill(0)
+  for (let i = 0; i < gray.length; i += 1) {
+    hist[Math.max(0, Math.min(255, gray[i] | 0))] += 1
+  }
+  return otsuFromHistogram(hist, gray.length)
+}
+
+// A tile grid mirrors CLAHE above, but scaled coarser (EDGE_TILE_RADIUS_MULTIPLE vs
+// CLAHE_TILE_RADIUS_MULTIPLE) - each tile needs enough edge pixels for its own Otsu
+// split to be meaningful, whereas CLAHE's finer grid only ever redistributes an
+// intensity histogram. Splitting per tile lets a dim region of the photo (a shadow,
+// a tinted overlay) be judged against its own edge-magnitude range instead of
+// whatever the brightest region's ink or paper-boundary edges happen to be.
+//
+// A tile is only allowed to drop toward the permissive EDGE_THRESHOLD_FLOOR_FRACTION
+// floor when `std` (the local-brightness normalization's own denominator, see
+// localRelativeBrightness) shows it actually has real tonal variation to work with.
+// Right at LOCAL_BRIGHTNESS_MIN_STD, that normalization divides by a near-zero
+// number, so a visually flat patch of paper - JPEG blocking, sensor noise, a faint
+// vignette - gets blown up into fake contrast that reads as texture. Lowering the
+// edge bar there on top of that amplification is what turns that fake contrast into
+// a phantom ring, so such tiles are instead held near the full global threshold.
+function localEdgeThreshold(mag, std, width, height, tilesX, tilesY, globalThreshold) {
+  const tileW = width / tilesX
+  const tileH = height / tilesY
+
+  const thresholds = new Float32Array(tilesX * tilesY)
+  for (let ty = 0; ty < tilesY; ty += 1) {
+    const y0 = Math.floor(ty * tileH)
+    const y1 = ty === tilesY - 1 ? height : Math.floor((ty + 1) * tileH)
+    for (let tx = 0; tx < tilesX; tx += 1) {
+      const x0 = Math.floor(tx * tileW)
+      const x1 = tx === tilesX - 1 ? width : Math.floor((tx + 1) * tileW)
+
+      let tileMax = 0
+      let stdSum = 0
+      let stdCount = 0
+      for (let y = y0; y < y1; y += 1) {
+        const row = y * width
+        for (let x = x0; x < x1; x += 1) {
+          if (mag[row + x] > tileMax) tileMax = mag[row + x]
+          stdSum += std[row + x]
+          stdCount += 1
+        }
+      }
+
+      const meanStd = stdCount > 0 ? stdSum / stdCount : 0
+      const reliability = Math.max(
+        0,
+        Math.min(1, (meanStd - LOCAL_BRIGHTNESS_MIN_STD) / (RELIABLE_STD_REFERENCE - LOCAL_BRIGHTNESS_MIN_STD))
+      )
+      const floor = globalThreshold * (1 - reliability * (1 - EDGE_THRESHOLD_FLOOR_FRACTION))
+
+      if (tileMax <= 0) {
+        thresholds[ty * tilesX + tx] = floor
+        continue
+      }
+
+      const hist = new Array(256).fill(0)
+      let count = 0
+      for (let y = y0; y < y1; y += 1) {
+        const row = y * width
+        for (let x = x0; x < x1; x += 1) {
+          const b = Math.max(0, Math.min(255, Math.round((mag[row + x] / tileMax) * 255)))
+          hist[b] += 1
+          count += 1
+        }
+      }
+      const t = otsuFromHistogram(hist, count)
+      thresholds[ty * tilesX + tx] = Math.max(floor, (t / 255) * tileMax)
+    }
+  }
+
+  const out = new Float32Array(width * height)
+  for (let y = 0; y < height; y += 1) {
+    let fy = (y + 0.5) / tileH - 0.5
+    fy = Math.max(0, Math.min(tilesY - 1, fy))
+    const ty0 = Math.floor(fy)
+    const ty1 = Math.min(tilesY - 1, ty0 + 1)
+    const wy = fy - ty0
+
+    for (let x = 0; x < width; x += 1) {
+      let fx = (x + 0.5) / tileW - 0.5
+      fx = Math.max(0, Math.min(tilesX - 1, fx))
+      const tx0 = Math.floor(fx)
+      const tx1 = Math.min(tilesX - 1, tx0 + 1)
+      const wx = fx - tx0
+
+      const t00 = thresholds[ty0 * tilesX + tx0]
+      const t01 = thresholds[ty0 * tilesX + tx1]
+      const t10 = thresholds[ty1 * tilesX + tx0]
+      const t11 = thresholds[ty1 * tilesX + tx1]
+      const top = t00 + (t01 - t00) * wx
+      const bottom = t10 + (t11 - t10) * wx
+      out[y * width + x] = top + (bottom - top) * wy
+    }
+  }
+  return out
 }
 
 function clahe(gray, width, height, tilesX, tilesY, clipLimit) {
@@ -155,16 +265,18 @@ function localRelativeBrightness(gray, width, height, sigma) {
   const meanSq = gaussianBlur(sq, width, height, sigma)
 
   const out = new Float32Array(gray.length)
+  const std = new Float32Array(gray.length)
   const clip = LOCAL_BRIGHTNESS_CLIP_STD
   for (let i = 0; i < gray.length; i += 1) {
     const variance = Math.max(0, meanSq[i] - mean[i] * mean[i])
-    const std = Math.sqrt(variance)
-    let z = std > LOCAL_BRIGHTNESS_MIN_STD ? (gray[i] - mean[i]) / std : 0
+    const s = Math.sqrt(variance)
+    std[i] = s
+    let z = s > LOCAL_BRIGHTNESS_MIN_STD ? (gray[i] - mean[i]) / s : 0
     if (z > clip) z = clip
     else if (z < -clip) z = -clip
     out[i] = ((z + clip) / (2 * clip)) * 255
   }
-  return out
+  return { relative: out, std }
 }
 
 function gaussianBlur(gray, width, height, sigma) {
@@ -495,7 +607,7 @@ function houghCircleVote(mag, gx, gy, width, height, { minRadius, maxRadius, dp,
     for (let x = 0; x < width; x += 1) {
       const idx = y * width + x
       const m = mag[idx]
-      if (m < edgeThreshold) continue
+      if (m < edgeThreshold[idx]) continue
       const ux = gx[idx] / m
       const uy = gy[idx] / m
 
@@ -622,7 +734,7 @@ export function detectCrescentCircles(imageData) {
   const tilesX = Math.max(3, Math.round(width / (CLAHE_TILE_RADIUS_MULTIPLE * maxRadius)))
   const tilesY = Math.max(3, Math.round(height / (CLAHE_TILE_RADIUS_MULTIPLE * maxRadius)))
   const equalized = clahe(gray, width, height, tilesX, tilesY, CLAHE_CLIP_LIMIT)
-  const relative = localRelativeBrightness(
+  const { relative, std: brightnessStd } = localRelativeBrightness(
     equalized,
     width,
     height,
@@ -631,10 +743,24 @@ export function detectCrescentCircles(imageData) {
   const blurred = gaussianBlur(relative, width, height, GRADIENT_BLUR_SIGMA)
 
   const { gx, gy, mag } = sobelGradient(blurred, width, height)
-  const edgeThreshold = otsuThreshold(stretchContrast(mag))
-  let magMax = 0
-  for (let i = 0; i < mag.length; i += 1) if (mag[i] > magMax) magMax = mag[i]
-  const scaledEdgeThreshold = magMax > 0 ? (edgeThreshold / 255) * magMax : 0
+
+  const globalEdgeThreshold = otsuThreshold(stretchContrast(mag))
+  let globalMagMax = 0
+  for (let i = 0; i < mag.length; i += 1) if (mag[i] > globalMagMax) globalMagMax = mag[i]
+  const scaledGlobalThreshold = globalMagMax > 0 ? (globalEdgeThreshold / 255) * globalMagMax : 0
+
+  const edgeTilesX = Math.max(2, Math.round(width / (EDGE_TILE_RADIUS_MULTIPLE * maxRadius)))
+  const edgeTilesY = Math.max(2, Math.round(height / (EDGE_TILE_RADIUS_MULTIPLE * maxRadius)))
+  const edgeThreshold = localEdgeThreshold(
+    mag,
+    brightnessStd,
+    width,
+    height,
+    edgeTilesX,
+    edgeTilesY,
+    scaledGlobalThreshold
+  )
+
   const thinned = nonMaxSuppress(mag, gx, gy, width, height)
 
   const dp = Math.min(MAX_ACCUMULATOR_DP, Math.max(MIN_ACCUMULATOR_DP, ACCUMULATOR_DP_RADIUS_CONSTANT / maxRadius))
@@ -642,7 +768,7 @@ export function detectCrescentCircles(imageData) {
     minRadius,
     maxRadius,
     dp,
-    edgeThreshold: scaledEdgeThreshold,
+    edgeThreshold,
   })
 
   const circles = findCircleCenters(bestCount, bestFraction, bestRadius, bestArc, accW, accH, dp, {

@@ -35,7 +35,7 @@ const headerCaptions = {
 }
 const translationSampleText = 'Hello, welcome to the Pi Translator.'
 const idealFocalDistanceCm = 4.8
-const COMPILE_MIN_SHARPNESS_PERCENT = 55
+const COMPILE_MIN_SHARPNESS_PERCENT = 60
 const ADMIN_USERNAME = 'admin'
 const ADMIN_PASSWORD = 'password'
 const fallbackSystemCommands = [

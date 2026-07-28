@@ -27,13 +27,21 @@ let lastDistanceOutputCm = null
 // scan if it's close enough to the focal plane to plausibly be in focus.
 const FOCAL_DISTANCE_CM = 4.8
 const IMAGE_SAVE_DISTANCE_TOLERANCE_CM = 1.5
-const IMAGE_SAVE_MIN_SHARPNESS_PERCENT = 55
 // Sharpness is computed client-side (browser canvas + JS, see
 // CameraStream.jsx) instead of via a server-side cv2 subprocess -- the
 // browser has CPU to spare and the Pi doesn't, which is exactly what the
 // earlier cv2-subprocess approach kept running into. The browser POSTs its
 // reading here and lcd.py/the web UI both just read back whatever was last
 // reported.
+//
+// This is only used for the live "Sharpness" readout and the LCD's blur
+// hint -- it is NOT used to gate which stills get saved (see the capture
+// loop below). A live 160x120 downsample of a compressed MJPEG frame is a
+// noisy sharpness estimate, and gating capture on top of the distance check
+// made the two conditions rarely align at once, so a scan's still count
+// would sit stuck at 0 even with the surface correctly in range. Sharpness
+// filtering instead happens once, client-side, against the full-resolution
+// saved stills when "Compile 3D model" is pressed (see App.jsx).
 const SHARPNESS_REPORT_STALE_MS = 5000
 let lastSharpnessReport = null
 
@@ -377,18 +385,8 @@ app.get('/api/camera/stream', async (req, res) => {
       if (!imageSaveInFlight && now - lastImageSavedAt >= IMAGE_SAVE_INTERVAL_MS) {
         const inFocalRange = lastDistanceOutputCm != null
           && Math.abs(lastDistanceOutputCm - FOCAL_DISTANCE_CM) < IMAGE_SAVE_DISTANCE_TOLERANCE_CM
-        // sharpnessPercent comes from the browser's own analysis of the live
-        // frame (see CameraStream.jsx) -- the Pi doesn't re-derive it here,
-        // it just reads back whatever the receiving PC last reported. A
-        // stale report (tab closed, analysis loop stalled) is treated the
-        // same as no report, same staleness window as GET /api/sharpness.
-        const sharpnessPercent = lastSharpnessReport != null
-          && now - lastSharpnessReport.reportedAt <= SHARPNESS_REPORT_STALE_MS
-          ? lastSharpnessReport.sharpnessPercent
-          : null
-        const sharpEnough = sharpnessPercent != null && sharpnessPercent >= IMAGE_SAVE_MIN_SHARPNESS_PERCENT
 
-        if (inFocalRange && sharpEnough) {
+        if (inFocalRange) {
           lastImageSavedAt = now
           imageSaveInFlight = true
           const filename = `img-${now}.jpg`
@@ -441,6 +439,20 @@ app.get('/api/images', async (_req, res) => {
     return { name, data: data.toString('base64') }
   }))
   res.json({ count: images.length, images })
+})
+
+// Called once the client has fetched every raw still for a compile pass --
+// clears raspimages/ so the next scan (and the "Stored images" counter)
+// starts from zero instead of mixing in stills the client already
+// processed. Mirrors the wipe done at server boot.
+app.delete('/api/images', async (_req, res) => {
+  try {
+    await fs.rm(IMAGES_DIR, { recursive: true, force: true })
+    await fs.mkdir(IMAGES_DIR, { recursive: true })
+    res.json({ success: true })
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message })
+  }
 })
 
 // Raspberry Pi OS ships python3 only; some dev machines still expose plain

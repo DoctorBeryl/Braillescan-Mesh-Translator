@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Activity, Aperture, Box, Bug, Clock, Cpu, Crosshair, Download, ExternalLink, Focus, Gauge, HardDrive, Home as HomeIcon, Image as ImageIcon, KeyRound, Languages as LanguagesIcon, Loader2, LogIn, LogOut, Lock, Moon, Palette, Settings, ShieldCheck, Sun, Terminal, Type, Video, Wifi, X } from 'lucide-react'
 import WifiPanel from './components/WifiPanel'
 import CameraStream from './components/CameraStream'
+import { computeSharpness, sampleImageData } from './lib/sharpness'
+import { hasCrescentShapes, sampleForCrescentDetection } from './lib/crescentDetect'
+import { base64ToBytes, createZipBlob, downloadBlob } from './lib/zip'
 
 const tabs = [
   { name: 'Home' },
@@ -32,6 +35,9 @@ const headerCaptions = {
 }
 const translationSampleText = 'Hello, welcome to the Pi Translator.'
 const idealFocalDistanceCm = 4.8
+// Matches the user-facing "sharpness of each image to be more than 55%"
+// requirement for which captured stills make it into the compiled zip.
+const COMPILE_MIN_SHARPNESS_PERCENT = 55
 const ADMIN_USERNAME = 'admin'
 const ADMIN_PASSWORD = 'password'
 const fallbackSystemCommands = [
@@ -97,6 +103,7 @@ function App() {
   const [exportError, setExportError] = useState('')
   const [compiling, setCompiling] = useState(false)
   const [compileError, setCompileError] = useState('')
+  const [compileStatus, setCompileStatus] = useState('')
   const [imagesPopup, setImagesPopup] = useState(null)
   const settingsRef = useRef(null)
   const modelViewerRef = useRef(null)
@@ -434,26 +441,67 @@ function App() {
       }
   const scaleStyle = { fontSize: `${textPercent}%` }
 
+  // Pulls every raw still off the Pi and does the whole "which frames are
+  // usable" pipeline right here in the browser: a sharp-enough check (same
+  // Laplacian-variance metric CameraStream's live readout uses, just run
+  // against the full saved still instead of a live low-res sample), then a
+  // crescent-shape check for the embossed-dot highlight/shadow pattern (see
+  // src/lib/crescentDetect.js). Frames that pass both get zipped and pushed
+  // to the browser as a download -- there's no server-side reconstruction
+  // step for this anymore, the Pi's only job was capturing the stills.
   const handleCompile = async () => {
     setCompiling(true)
     setCompileError('')
+    setCompileStatus('Fetching stored images…')
     try {
-      const compileResponse = await fetch('/api/compile', { method: 'POST' })
-      const compileData = await compileResponse.json()
-      if (!compileResponse.ok || !compileData.success) {
-        throw new Error(compileData.message || 'Compile failed.')
+      const imagesResponse = await fetch('/api/images')
+      const imagesData = await imagesResponse.json()
+      if (!imagesResponse.ok) throw new Error(imagesData.message || 'Failed to load stored images.')
+
+      const allImages = imagesData.images ?? []
+      const canvas = document.createElement('canvas')
+      const matches = []
+
+      for (let i = 0; i < allImages.length; i += 1) {
+        const image = allImages[i]
+        setCompileStatus(`Checking image ${i + 1} of ${allImages.length}…`)
+
+        // Awaited one at a time (not Promise.all) so every still can reuse
+        // the same canvas instead of decoding dozens of frames in parallel.
+        const img = new Image()
+        await new Promise((resolve, reject) => {
+          img.onload = resolve
+          img.onerror = () => reject(new Error(`Failed to decode ${image.name}.`))
+          img.src = `data:image/jpeg;base64,${image.data}`
+        })
+
+        const { sharpnessPercent } = computeSharpness(sampleImageData(img, canvas))
+        if (sharpnessPercent < COMPILE_MIN_SHARPNESS_PERCENT) continue
+
+        const detectionData = sampleForCrescentDetection(img, canvas, img.naturalWidth, img.naturalHeight)
+        if (!hasCrescentShapes(detectionData)) continue
+
+        matches.push(image)
       }
 
-      const imagesResponse = await fetch('/api/output/images')
-      const imagesData = await imagesResponse.json()
-      if (!imagesResponse.ok) throw new Error(imagesData.message || 'Failed to load compiled images.')
-
-      setImagesPopup({ images: imagesData.images ?? [] })
+      setImagesPopup({ images: matches })
       setCompileProgress((value) => Math.min(100, value + 18))
+
+      if (matches.length > 0) {
+        setCompileStatus(`Zipping ${matches.length} image${matches.length === 1 ? '' : 's'}…`)
+        const zipBlob = createZipBlob(matches.map((image) => ({ name: image.name, data: base64ToBytes(image.data) })))
+        downloadBlob(zipBlob, `braille-scan-${Date.now()}.zip`)
+      }
+
+      // Every still has now been read into the browser -- clear the Pi's
+      // copy so the "Stored images" counter (and the next scan) starts
+      // fresh instead of mixing in frames this pass already processed.
+      await fetch('/api/images', { method: 'DELETE' }).catch(() => {})
     } catch (err) {
       setCompileError(err.message || 'Compile failed.')
     } finally {
       setCompiling(false)
+      setCompileStatus('')
     }
   }
 
@@ -643,9 +691,14 @@ function App() {
                 className={`mt-2 flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${tone.button}`}
               >
                 {compiling && <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2.25} />}
-                {compiling ? 'Sending images…' : 'Compile 3D model'}
+                {compiling ? (compileStatus || 'Working…') : 'Compile 3D model'}
               </button>
               {compileError && <p className="mt-1.5 text-xs text-red-400">{compileError}</p>}
+              {!compileError && (
+                <p className={`mt-1.5 text-xs ${themePalette.muted}`}>
+                  Checks each stored image for sharpness (&ge;{COMPILE_MIN_SHARPNESS_PERCENT}%) and dot crescents, then zips and downloads the matches.
+                </p>
+              )}
             </div>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
               <div className="mb-2 flex items-center justify-between text-sm">
@@ -1203,7 +1256,7 @@ function App() {
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center justify-between">
-              <p className={`text-sm font-semibold ${themePalette.text}`}>Compile results ({imagesPopup.images.length})</p>
+              <p className={`text-sm font-semibold ${themePalette.text}`}>Crescent matches ({imagesPopup.images.length})</p>
               <button
                 type="button"
                 onClick={() => setImagesPopup(null)}
@@ -1214,7 +1267,7 @@ function App() {
               </button>
             </div>
             {imagesPopup.images.length === 0 ? (
-              <p className={`mt-3 text-sm ${themePalette.secondary}`}>No output images were produced.</p>
+              <p className={`mt-3 text-sm ${themePalette.secondary}`}>No stored images were both sharp enough and had detectable dot crescents.</p>
             ) : (
               <div className="mt-3 grid max-h-[70vh] grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3">
                 {imagesPopup.images.map((image) => (

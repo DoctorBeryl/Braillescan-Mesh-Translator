@@ -324,7 +324,11 @@ function filterToRadiusMode(circles) {
 
 const MIN_CANDIDATES_FOR_GRID_FILTER = 6
 const GRID_PITCH_TOLERANCE = 0.25
-const GRID_PITCH_MULTIPLES = [1, 2, 3]
+// Includes diagonal lattice distances (sqrt(2), sqrt(5), 2*sqrt(2)) in addition to
+// straight multiples, since a dot's nearest neighbor in a 2D grid is often diagonal
+// rather than axis-aligned — omitting these caused whole clusters of valid dots to
+// be rejected whenever their nearest neighbor happened to be diagonal.
+const GRID_PITCH_MULTIPLES = [1, Math.SQRT2, 2, Math.sqrt(5), 2 * Math.SQRT2, 3]
 
 function filterToGrid(circles) {
   if (circles.length < MIN_CANDIDATES_FOR_GRID_FILTER) return circles

@@ -339,6 +339,7 @@ async function startCameraStream() {
 
     let startupFailed = false
     child.once('error', (err) => {
+      if (cameraManager.child !== child) return
       startupFailed = true
       cameraManager.enabled = false
       cameraManager.child = null
@@ -347,6 +348,7 @@ async function startCameraStream() {
       console.error('Camera process error:', err.message)
     })
     child.once('exit', () => {
+      if (cameraManager.child !== child) return
       cameraManager.enabled = false
       cameraManager.child = null
       cameraStats.streaming = false

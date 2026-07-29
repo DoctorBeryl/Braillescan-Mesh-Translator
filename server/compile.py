@@ -1,12 +1,12 @@
 """Builds a composite of the scanned Braille surface out of the raw camera stills.
 
-Pipeline: clean output/ -> for each image in input/, skip it unless it's sharp
-and near-flat (<5 deg skew) -> detect the braille dot centers in it, along
-with each dot's raking-light polarity (bump facing the camera vs. a dimple
-facing away, see classify_dot_polarity) -> try to align it onto an existing
-output image by finding a rotation+translation that lines up enough of its
-dots (position *and* polarity) with that image's dots -> if nothing
-correlates, seed a new output image with it -> clean input/.
+Pipeline: clean output/ -> for each image in input/, skip it unless it's
+sharp -> detect the braille dot centers in it, along with each dot's
+raking-light polarity (bump facing the camera vs. a dimple facing away, see
+classify_dot_polarity) -> try to align it onto an existing output image by
+finding a rotation+translation that lines up enough of its dots (position
+*and* polarity) with that image's dots -> if nothing correlates, seed a new
+output image with it -> clean input/.
 
 Alignment is done from the dot *positions* rather than generic ORB/SIFT
 features: a braille dot grid is highly repetitive texture, so descriptor
@@ -53,7 +53,6 @@ SHARPNESS_THRESHOLD = 100.0   # variance of Laplacian; below this, image is too 
 # re-judged blurry here just because it's being read at full camera resolution.
 SHARPNESS_SAMPLE_WIDTH = 160
 SHARPNESS_SAMPLE_HEIGHT = 120
-MAX_ANGLE_DEGREES = 5.0       # max acceptable skew of the paper/text in frame
 
 # Dot detection. Same size-fraction assumptions as src/lib/crescentDetect.js
 # (MIN/MAX_RADIUS_FRACTION), since both read the same physical setup: a fixed
@@ -116,21 +115,6 @@ def is_sharp(gray):
     small = cv2.resize(gray, (SHARPNESS_SAMPLE_WIDTH, SHARPNESS_SAMPLE_HEIGHT))
     stretched = cv2.normalize(small, None, 0, 255, cv2.NORM_MINMAX)
     return cv2.Laplacian(stretched, cv2.CV_64F).var() >= SHARPNESS_THRESHOLD
-
-
-def skew_angle(gray):
-    # Standard deskew recipe: fit a min-area rect around the ink/foreground
-    # pixels and read its rotation off, normalized to +/-45 degrees.
-    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-    coords = np.column_stack(np.where(thresh > 0))
-    if coords.shape[0] < 2:
-        return 0.0
-    angle = cv2.minAreaRect(coords)[-1]
-    if angle < -45:
-        angle = -(90 + angle)
-    else:
-        angle = -angle
-    return angle
 
 
 def _bilinear_sample(field, x, y):
@@ -483,7 +467,6 @@ def main():
     expanded = 0
     skipped_unreadable = 0
     skipped_blurry = 0
-    skipped_skewed = 0
     dots_cache = {}  # output path -> detected dot centers, invalidated on write
     log_lines = []
 
@@ -499,11 +482,6 @@ def main():
         if not is_sharp(gray):
             skipped_blurry += 1
             log_lines.append(f'{name}: skipped (too blurry)')
-            continue
-        angle = skew_angle(gray)
-        if abs(angle) > MAX_ANGLE_DEGREES:
-            skipped_skewed += 1
-            log_lines.append(f'{name}: skipped (skew {angle:.1f} deg > {MAX_ANGLE_DEGREES})')
             continue
 
         new_points, new_polarity = detect_dots(gray)
@@ -561,7 +539,7 @@ def main():
     print(
         f'Processed {len(input_paths)} image(s): '
         f'{seeded} seeded, {expanded} expanded, '
-        f'{skipped_blurry} too blurry, {skipped_skewed} too skewed, '
+        f'{skipped_blurry} too blurry, '
         f'{skipped_unreadable} unreadable.'
     )
 

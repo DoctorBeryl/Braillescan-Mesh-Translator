@@ -13,6 +13,7 @@ const PORT = process.env.WIFI_SERVER_PORT || 3001
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url))
 const IMAGES_DIR = path.join(SERVER_DIR, '..', 'raspimages')
 const OUTPUT_DIR = path.join(SERVER_DIR, '..', 'output')
+const RAW_DEBUG_DIR = path.join(SERVER_DIR, '..', 'raw_debug')
 const IMAGE_SAVE_INTERVAL_MS = 1000
 const COMPILE_SCRIPT = path.join(SERVER_DIR, 'compile.py')
 const COMPILE_TIMEOUT_MS = 5 * 60 * 1000
@@ -526,6 +527,48 @@ app.get('/api/output/images', async (_req, res) => {
   const names = await listOutputImages()
   const images = await Promise.all(names.map(async (name) => {
     const data = await fs.readFile(path.join(OUTPUT_DIR, name))
+    return { name, data: data.toString('base64') }
+  }))
+  res.json({ count: images.length, images })
+})
+
+async function latestRawDebugRunDir() {
+  let entries
+  try {
+    entries = await fs.readdir(RAW_DEBUG_DIR, { withFileTypes: true })
+  } catch {
+    return null
+  }
+  const runDirs = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()
+  if (runDirs.length === 0) return null
+  return path.join(RAW_DEBUG_DIR, runDirs[runDirs.length - 1])
+}
+
+app.get('/api/raw-debug/images', async (_req, res) => {
+  const runDir = await latestRawDebugRunDir()
+  if (!runDir) {
+    res.json({ count: 0, images: [] })
+    return
+  }
+
+  let entries
+  try {
+    entries = await fs.readdir(runDir, { withFileTypes: true })
+  } catch {
+    res.json({ count: 0, images: [] })
+    return
+  }
+
+  const names = entries
+    .filter((entry) => entry.isFile() && /\.(jpe?g|png)$/i.test(entry.name))
+    .map((entry) => entry.name)
+    .sort()
+
+  const images = await Promise.all(names.map(async (name) => {
+    const data = await fs.readFile(path.join(runDir, name))
     return { name, data: data.toString('base64') }
   }))
   res.json({ count: images.length, images })

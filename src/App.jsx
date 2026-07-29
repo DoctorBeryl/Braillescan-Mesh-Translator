@@ -516,6 +516,17 @@ function App() {
           const stitchedZip = createZipBlob(stitched.map((image) => ({ name: image.name, data: base64ToBytes(image.data) })))
           downloadBlob(stitchedZip, `braille-stitched-${Date.now()}.zip`)
         }
+
+        if (keepRawDebug) {
+          const rawDebugResponse = await fetch('/api/raw-debug/images')
+          const rawDebugData = await rawDebugResponse.json()
+          const rawDebugImages = rawDebugData.images ?? []
+          if (rawDebugImages.length > 0) {
+            setCompileStatus(`Zipping ${rawDebugImages.length} raw debug capture${rawDebugImages.length === 1 ? '' : 's'}…`)
+            const rawDebugZip = createZipBlob(rawDebugImages.map((image) => ({ name: image.name, data: base64ToBytes(image.data) })))
+            downloadBlob(rawDebugZip, `braille-raw-debug-${Date.now()}.zip`)
+          }
+        }
       } catch (err) {
         setCompileError(err.message || 'Stitching failed.')
         // compile.py cleans raspimages/ itself once it runs; only needed here

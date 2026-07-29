@@ -26,6 +26,7 @@ shading and doesn't depend on position at all, so requiring it to agree is an
 independent check that a merely periodic mismatch can't satisfy by accident.
 """
 import glob
+import json
 import os
 import shutil
 import sys
@@ -576,6 +577,199 @@ def merge_into_canvas(base_bgr, new_bgr, m):
     return np.clip(result, 0, 255).astype(np.uint8)
 
 
+# --- Braille letter decoding -------------------------------------------------
+#
+# detect_dots() above exists only to align photos onto each other; decoding
+# what the dots actually spell is a separate, later pass (see
+# decode_output_pieces, called once per finished piece from main() below). It
+# reuses the same detected dot *positions* but ignores polarity entirely -
+# polarity identifies the same physical dot across two raking-light exposures
+# of it, which has nothing to do with a dot's identity within a Braille cell,
+# and by the time a piece is finished its dots may come from several photos
+# shot under different raking angles anyway.
+#
+# A Braille cell is a fixed 2-column x 3-row lattice of dot slots (dots
+# numbered 1-6: top/middle/bottom of the left column, then top/middle/bottom
+# of the right column). Both the spacing within a cell (dot pitch) and how
+# cells repeat across a line (cell pitch, ~6.2mm) and lines repeat down a page
+# (line pitch, ~10mm) are fixed by the physical Braille standard in a set
+# ratio to the dot pitch (~2.5mm) - a ratio that holds regardless of how far
+# away or zoomed-in the camera is. So once dot pitch is estimated from the
+# detected points (the same periodic-grid estimate _estimate_grid_pitch above
+# already does for the shape filters), the rest of the page lattice follows
+# from it, without needing to see the actual cell/line boundaries.
+BRAILLE_CELL_PITCH_RATIO = 2.45   # cell-to-cell pitch (~6.2mm) / dot pitch (~2.5mm)
+BRAILLE_LINE_PITCH_RATIO = 4.0    # line-to-line pitch (~10mm) / dot pitch (~2.5mm)
+BRAILLE_MIN_DOTS_TO_DECODE = 3    # too few dots to even estimate a pitch from
+BRAILLE_PHASE_SEARCH_STEPS = 48   # resolution of the grid-phase search below
+# A real gap between text lines is a full BRAILLE_LINE_PITCH_RATIO dot-pitches,
+# while a single line's own 3 rows of dots span at most 2 dot-pitches - so
+# anything comfortably between those two figures only ever falls between
+# lines, never within one.
+BRAILLE_LINE_SPLIT_PITCH_MULTIPLE = 1.75
+
+# Standard Grade 1 (uncontracted) English Braille lowercase alphabet, keyed by
+# the frozenset of raised dot numbers (1-6, see the cell-slot layout above).
+# Numbers, capitalization and punctuation cells aren't handled - see
+# decode_braille_text's docstring.
+BRAILLE_ALPHABET = {
+    frozenset({1}): 'a', frozenset({1, 2}): 'b', frozenset({1, 4}): 'c',
+    frozenset({1, 4, 5}): 'd', frozenset({1, 5}): 'e', frozenset({1, 2, 4}): 'f',
+    frozenset({1, 2, 4, 5}): 'g', frozenset({1, 2, 5}): 'h', frozenset({2, 4}): 'i',
+    frozenset({2, 4, 5}): 'j', frozenset({1, 3}): 'k', frozenset({1, 2, 3}): 'l',
+    frozenset({1, 3, 4}): 'm', frozenset({1, 3, 4, 5}): 'n', frozenset({1, 3, 5}): 'o',
+    frozenset({1, 2, 3, 4}): 'p', frozenset({1, 2, 3, 4, 5}): 'q', frozenset({1, 2, 3, 5}): 'r',
+    frozenset({2, 3, 4}): 's', frozenset({2, 3, 4, 5}): 't', frozenset({1, 3, 6}): 'u',
+    frozenset({1, 2, 3, 6}): 'v', frozenset({2, 4, 5, 6}): 'w', frozenset({1, 3, 4, 6}): 'x',
+    frozenset({1, 3, 4, 5, 6}): 'y', frozenset({1, 3, 5, 6}): 'z',
+}
+# (row, col) -> Braille dot number, for the 2-column x 3-row cell slot layout.
+BRAILLE_DOT_SLOTS = {(0, 0): 1, (1, 0): 2, (2, 0): 3, (0, 1): 4, (1, 1): 5, (2, 1): 6}
+
+
+def _best_absolute_phase(values, tooth_spacing, num_teeth):
+    """Find the offset in [0, tooth_spacing) that best explains `values` as
+    samples of a fixed, non-repeating comb {offset, offset+tooth_spacing,
+    offset+2*tooth_spacing, ...} (num_teeth teeth total), by minimizing each
+    value's squared distance to its nearest tooth. Used for row phase within
+    one line: a line only ever has 3 absolute rows, not a repeating pattern.
+    A coarse grid search rather than a closed form because which tooth is
+    "nearest" changes discontinuously as the offset moves."""
+    best_offset, best_cost = 0.0, None
+    for step in range(BRAILLE_PHASE_SEARCH_STEPS):
+        offset = (step / BRAILLE_PHASE_SEARCH_STEPS) * tooth_spacing
+        teeth = np.array([offset + k * tooth_spacing for k in range(num_teeth)])
+        residual = np.abs(values[:, None] - teeth[None, :])
+        cost = float(np.sum(residual.min(axis=1) ** 2))
+        if best_cost is None or cost < best_cost:
+            best_cost, best_offset = cost, offset
+    return best_offset
+
+
+def _best_circular_phase(values, modulus, tooth_spacing, num_teeth):
+    """Like _best_absolute_phase, but the comb repeats every `modulus` (so
+    distance wraps around), and only the first `num_teeth` teeth within each
+    period are compared against - e.g. a cell's 2 columns repeating every
+    cell_pitch, well short of filling it. Used for cell-column phase, which
+    (unlike row phase) really does repeat across every cell on the page."""
+    wrapped = np.mod(values, modulus)
+    best_offset, best_cost = 0.0, None
+    for step in range(BRAILLE_PHASE_SEARCH_STEPS):
+        offset = (step / BRAILLE_PHASE_SEARCH_STEPS) * modulus
+        teeth = np.array([(offset + k * tooth_spacing) % modulus for k in range(num_teeth)])
+        diff = np.abs(wrapped[:, None] - teeth[None, :])
+        circular_diff = np.minimum(diff, modulus - diff)
+        cost = float(np.sum(circular_diff.min(axis=1) ** 2))
+        if best_cost is None or cost < best_cost:
+            best_cost, best_offset = cost, offset
+    return best_offset
+
+
+def _split_into_lines(points, line_gap):
+    """Group points by text line via a 1D gap split on y (see
+    BRAILLE_LINE_SPLIT_PITCH_MULTIPLE for why a single gap threshold safely
+    separates lines without splitting a line's own rows apart)."""
+    order = np.argsort(points[:, 1])
+    sorted_points = points[order]
+    lines = []
+    current = [0]
+    for i in range(1, len(sorted_points)):
+        if sorted_points[i, 1] - sorted_points[i - 1, 1] > line_gap:
+            lines.append(sorted_points[current])
+            current = []
+        current.append(i)
+    lines.append(sorted_points[current])
+    return lines
+
+
+def decode_braille_text(points):
+    """Best-effort transcription of `points` (as returned by detect_dots,
+    polarity ignored - see the module note above) into lowercase text.
+    Returns '' if there aren't enough dots to even estimate the grid.
+
+    This reconstructs the physical dot lattice heuristically; it is not a
+    guaranteed-correct OCR pass. It assumes clean Grade 1 (uncontracted)
+    lowercase text with no numbers, capitals or punctuation cells, and its
+    accuracy depends entirely on how cleanly detect_dots recovered the real
+    dot positions on this particular piece. An unrecognized dot pattern
+    (usually a missed or spurious dot) comes out as '?' rather than being
+    silently dropped, so a bad read is visible instead of just missing.
+    """
+    if len(points) < BRAILLE_MIN_DOTS_TO_DECODE:
+        return ''
+
+    dists = np.sqrt(((points[:, None, :] - points[None, :, :]) ** 2).sum(axis=2))
+    np.fill_diagonal(dists, np.inf)
+    pitch = _estimate_grid_pitch(dists.min(axis=1))
+    if not pitch:
+        return ''
+
+    cell_pitch = pitch * BRAILLE_CELL_PITCH_RATIO
+    line_gap = pitch * BRAILLE_LINE_SPLIT_PITCH_MULTIPLE
+    # Found globally (across every line and every cell at once): with many
+    # cells' worth of dots to vote, this is a far better-supported estimate of
+    # where a cell's left column sits than any single line - let alone single
+    # cell - could give on its own. Circular because the column pattern
+    # genuinely repeats every cell_pitch all the way across the page.
+    phase_x = _best_circular_phase(points[:, 0], cell_pitch, pitch, 2)
+
+    lines_text = []
+    for line_points in _split_into_lines(points, line_gap):
+        # Row phase is only found *within* this line - unlike cell columns,
+        # rows don't repeat across the page, just 3 times within one line, so
+        # there's no modulus to wrap around here.
+        y0 = float(line_points[:, 1].min())
+        phase_y = y0 + _best_absolute_phase(line_points[:, 1] - y0, pitch, 3)
+
+        cells = defaultdict(set)
+        for x, y in line_points:
+            cell_index = int(round((x - phase_x) / cell_pitch))
+            local_x = x - phase_x - cell_index * cell_pitch
+            col = 0 if abs(local_x) < abs(local_x - pitch) else 1
+            row = int(np.clip(round((y - phase_y) / pitch), 0, 2))
+            cells[cell_index].add(BRAILLE_DOT_SLOTS[(row, col)])
+
+        if not cells:
+            continue
+        # A cell slot with no dots at all (a word space) never shows up in
+        # `cells`, but its index is still implied by the gap between its
+        # neighbors' indices - walking the full index range (not just
+        # `cells`'s keys) is what recovers those spaces.
+        chars = [
+            (BRAILLE_ALPHABET.get(frozenset(cells[index]), '?') if index in cells else ' ')
+            for index in range(min(cells), max(cells) + 1)
+        ]
+        lines_text.append(''.join(chars).strip())
+
+    return ' '.join(line for line in lines_text if line)
+
+
+def decode_output_pieces():
+    """Best-effort per-piece transcription, run once per finished output
+    piece after every merge for this compile run is done - re-running this
+    mid-merge would just be discarded work, since a piece's dot layout can
+    still grow right up until its last matching photo. Returns the decoded
+    list and also writes it to OUTPUT_DIR/words.json (a filename
+    server/index.js's /api/output/images deliberately won't match, so it
+    doesn't show up as a stitched piece)."""
+    words = []
+    output_paths = sorted(
+        p for p in glob.glob(os.path.join(OUTPUT_DIR, '*'))
+        if os.path.isfile(p) and p.lower().endswith(('.jpg', '.jpeg', '.png'))
+    )
+    for path in output_paths:
+        img = cv2.imread(path)
+        if img is None:
+            continue
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        points, _ = detect_dots(gray)
+        words.append({'image': os.path.basename(path), 'text': decode_braille_text(points)})
+
+    with open(os.path.join(OUTPUT_DIR, 'words.json'), 'w', encoding='utf-8') as f:
+        json.dump(words, f)
+    return words
+
+
 def main():
     os.makedirs(INPUT_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -662,6 +856,12 @@ def main():
                 log_lines.append(f'{name}: seeded as {out_name} (first piece, {len(new_points)} dots detected)')
 
     clean_dir(INPUT_DIR)
+
+    words = decode_output_pieces()
+    for word in words:
+        log_lines.append(
+            f"{word['image']}: read \"{word['text']}\"" if word['text'] else f"{word['image']}: no text read"
+        )
 
     for line in log_lines:
         print(line)

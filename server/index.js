@@ -45,8 +45,8 @@ const cameraStats = {
 const app = express()
 app.use(express.json({ limit: '10kb' }))
 
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin'
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'password'
+const ADMIN_USERNAME = 'admin'
+const ADMIN_PASSWORD = 'password'
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000
 const sessions = new Map()
 

@@ -577,6 +577,75 @@ function filterByLightProfile(circles, relative, width, height) {
   return kept.length > 0 ? kept : circles
 }
 
+const EDGE_SAMPLE_INNER_RADIUS_MULTIPLE = 0.85
+const EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE = 1.3
+const EDGE_SAMPLE_RADIAL_STEPS = 4
+const EDGE_SAMPLE_HALF_ANGLE_SAMPLES = 16
+const LIGHT_DIRECTION_BLUR_DIVISOR = 6
+
+// The raking light used to photograph an embossed page is a single, page-wide
+// source, so its direction is estimated once for the whole frame rather than per
+// dot. Blurring well past dot scale strips out the crescent shading itself (that's
+// the signal classifyDotDirection reads per-dot) and leaves only the coarse
+// dark-to-light gradient the light casts across the paper as a whole.
+function estimateGlobalLightAngle(gray, width, height) {
+  const sigma = Math.max(width, height) / LIGHT_DIRECTION_BLUR_DIVISOR
+  const blurred = gaussianBlur(gray, width, height, sigma)
+  const { gx, gy } = sobelGradient(blurred, width, height)
+  let sumX = 0
+  let sumY = 0
+  for (let i = 0; i < gx.length; i += 1) {
+    sumX += gx[i]
+    sumY += gy[i]
+  }
+  return Math.atan2(sumY, sumX)
+}
+
+// Averages the locally-normalized brightness over the half of the dot's edge ring
+// centered on centerAngle (a 180-degree wedge), sampled across a small radial band
+// straddling the rim so the crescent itself - not the flat paper beyond it - is what
+// gets measured.
+function sampleHalfRingBrightness(relative, width, height, cx, cy, r, centerAngle) {
+  let sum = 0
+  let count = 0
+  for (let s = 0; s < EDGE_SAMPLE_RADIAL_STEPS; s += 1) {
+    const frac = EDGE_SAMPLE_RADIAL_STEPS === 1 ? 0.5 : s / (EDGE_SAMPLE_RADIAL_STEPS - 1)
+    const sampleR =
+      r * (EDGE_SAMPLE_INNER_RADIUS_MULTIPLE + frac * (EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE - EDGE_SAMPLE_INNER_RADIUS_MULTIPLE))
+    for (let a = 0; a < EDGE_SAMPLE_HALF_ANGLE_SAMPLES; a += 1) {
+      const theta = centerAngle - Math.PI / 2 + ((a + 0.5) / EDGE_SAMPLE_HALF_ANGLE_SAMPLES) * Math.PI
+      const sx = cx + Math.cos(theta) * sampleR
+      const sy = cy + Math.sin(theta) * sampleR
+      sum += bilinearSample(relative, width, height, sx, sy)
+      count += 1
+    }
+  }
+  return count > 0 ? sum / count : 0
+}
+
+// A convex bump's rim on the side nearest the light catches that light directly and
+// reads bright, while its far rim self-shadows. A concave dimple is the mirror
+// image: the light passes over its near rim and lands on the far wall instead, so
+// the far side reads bright and the near side is the one in shadow. Comparing the
+// two halves against the page's actual light direction is what tells bumps and
+// dimples apart - an absolute brightness cutoff can't, since every embossed dot has
+// a shadowed side somewhere regardless of which way it points.
+function classifyDotDirection(circles, relative, width, height, lightAngle) {
+  return circles.map((circle) => {
+    const towardLight = sampleHalfRingBrightness(relative, width, height, circle.cx, circle.cy, circle.r, lightAngle)
+    const awayFromLight = sampleHalfRingBrightness(
+      relative,
+      width,
+      height,
+      circle.cx,
+      circle.cy,
+      circle.r,
+      lightAngle + Math.PI
+    )
+    return { ...circle, facingCamera: towardLight > awayFromLight }
+  })
+}
+
 function longestCircularRun(mask, numSectors) {
   if (mask === 0) return 0
   let maxRun = 0
@@ -778,5 +847,7 @@ export function detectCrescentCircles(imageData) {
   const inkFiltered = filterOutInk(circles, equalized, width, height)
   const shapeFiltered = filterToGrid(filterToRadiusMode(inkFiltered))
   const lightFiltered = filterByLightProfile(shapeFiltered, relative, width, height)
-  return lightFiltered.map(({ cx, cy, r }) => ({ cx, cy, r }))
+  const lightAngle = estimateGlobalLightAngle(gray, width, height)
+  const classified = classifyDotDirection(lightFiltered, relative, width, height, lightAngle)
+  return classified.map(({ cx, cy, r, facingCamera }) => ({ cx, cy, r, facingCamera }))
 }

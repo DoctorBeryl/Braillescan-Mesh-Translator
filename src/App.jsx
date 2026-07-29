@@ -470,9 +470,9 @@ function App() {
         markupCanvas.height = img.naturalHeight
         const markupCtx = markupCanvas.getContext('2d')
         markupCtx.drawImage(img, 0, 0)
-        markupCtx.fillStyle = '#22c55e'
         const markerRadius = Math.max(2, Math.round(Math.min(img.naturalWidth, img.naturalHeight) * 0.006))
-        for (const { cx, cy } of circles) {
+        for (const { cx, cy, facingCamera } of circles) {
+          markupCtx.fillStyle = facingCamera ? '#22c55e' : '#ef4444'
           markupCtx.beginPath()
           markupCtx.arc(cx * scaleX, cy * scaleY, markerRadius, 0, Math.PI * 2)
           markupCtx.fill()

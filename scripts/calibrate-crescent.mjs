@@ -79,11 +79,15 @@ for (const fname of files) {
   const scaleY = height / detH
   const markerRadius = Math.max(2, Math.round(Math.min(width, height) * 0.008))
   const out = Uint8ClampedArray.from(data)
-  for (const { cx, cy } of circles) {
-    drawFilledCircle(out, width, height, cx * scaleX, cy * scaleY, markerRadius, [34, 197, 94])
+  for (const { cx, cy, facingCamera } of circles) {
+    const color = facingCamera ? [34, 197, 94] : [239, 68, 68]
+    drawFilledCircle(out, width, height, cx * scaleX, cy * scaleY, markerRadius, color)
   }
 
   const encoded = jpeg.encode({ data: out, width, height }, 92)
   writeFileSync(join(OUT_DIR, fname), encoded.data)
-  console.log(`${fname}: ${circles.length} dot(s) detected (detect res ${detW}x${detH})`)
+  const facing = circles.filter((c) => c.facingCamera).length
+  console.log(
+    `${fname}: ${circles.length} dot(s) detected (${facing} facing camera, ${circles.length - facing} facing away) (detect res ${detW}x${detH})`
+  )
 }

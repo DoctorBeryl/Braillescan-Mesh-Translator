@@ -38,6 +38,13 @@ INPUT_DIR = os.path.join(SERVER_DIR, '..', 'raspimages')
 OUTPUT_DIR = os.path.join(SERVER_DIR, '..', 'output')
 
 SHARPNESS_THRESHOLD = 100.0   # variance of Laplacian; below this, image is too blurry
+# Laplacian variance scales with resolution (more pixels means more high-frequency
+# detail for the same real sharpness), so it's only comparable to a fixed
+# threshold at a fixed sample size. Matches src/lib/sharpness.js's
+# SHARPNESS_SAMPLE_WIDTH/HEIGHT so a photo the client already judged sharp isn't
+# re-judged blurry here just because it's being read at full camera resolution.
+SHARPNESS_SAMPLE_WIDTH = 160
+SHARPNESS_SAMPLE_HEIGHT = 120
 MAX_ANGLE_DEGREES = 5.0       # max acceptable skew of the paper/text in frame
 
 # Dot detection. Same size-fraction assumptions as src/lib/crescentDetect.js
@@ -53,14 +60,25 @@ MAX_DOTS_PER_IMAGE = 150      # bounds RANSAC cost; excess low-confidence circle
 LOCAL_BRIGHTNESS_SIGMA_RADIUS_MULTIPLE = 1.6
 LOCAL_BRIGHTNESS_MIN_STD = 0.75
 LOCAL_BRIGHTNESS_CLIP_STD = 2.5
-LIGHT_DIRECTION_BLUR_DIVISOR = 6
-EDGE_SAMPLE_INNER_RADIUS_MULTIPLE = 0.85
-EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE = 1.3
-EDGE_SAMPLE_RADIAL_STEPS = 4
+# Sampling this close to the rim (previously 0.85-1.3r) put most of the band on or
+# past the dot's own boundary, averaging in the flat paper beside it rather than the
+# dome's own shading, which is strong across the whole disc, not just a thin ring at
+# the edge. See src/lib/crescentDetect.js's matching change.
+EDGE_SAMPLE_INNER_RADIUS_MULTIPLE = 0.15
+EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE = 0.95
+EDGE_SAMPLE_RADIAL_STEPS = 6
 EDGE_SAMPLE_HALF_ANGLE_SAMPLES = 16
+DOT_DIRECTION_ANGLE_SAMPLES = 24
 
 # Dot-based alignment (RANSAC over rigid transforms).
-MIN_DOT_MATCHES = 6           # aligned dot pairs required to call two images connected
+# 5 sounds low, but each inlier here is already load-bearing on its own: it has
+# to land within POINT_MATCH_TOLERANCE_PX under a single shared rigid
+# transform *and* agree in polarity, and a wrong-by-one-pitch transform (the
+# periodic-grid ambiguity described up top) would have to fake that same
+# polarity pattern at the grid's own period to slip through. That combination
+# makes 5 clean inliers already a strong signal; real overlapping photos were
+# being rejected one dot short of the old threshold of 6.
+MIN_DOT_MATCHES = 5           # aligned dot pairs required to call two images connected
 DOT_RANSAC_ITERATIONS = 800
 POINT_MATCH_TOLERANCE_PX = 6.0   # how close a transformed dot must land to a real dot to count
 PAIR_DISTANCE_TOLERANCE_PX = 4.0 # how closely two pivot-pair distances must agree to try a transform
@@ -81,12 +99,14 @@ def clean_dir(path):
 
 
 def is_sharp(gray):
-    # Stretch to the full 0-255 range first -- Laplacian variance scales with
-    # contrast as well as focus, so a washed-out/flatly-lit still (embossed
-    # dots close in tone to the background) would otherwise read as blurry
-    # even in perfect focus. See src/components/CameraStream.jsx for the
-    # matching client-side normalization.
-    stretched = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+    # Resized to the same fixed sample size the client scores sharpness at
+    # (see SHARPNESS_SAMPLE_WIDTH/HEIGHT above) before stretching to the full
+    # 0-255 range -- stretch first, Laplacian variance scales with contrast as
+    # well as focus, so a washed-out/flatly-lit still (embossed dots close in
+    # tone to the background) would otherwise read as blurry even in perfect
+    # focus. See src/lib/sharpness.js for the matching client-side check.
+    small = cv2.resize(gray, (SHARPNESS_SAMPLE_WIDTH, SHARPNESS_SAMPLE_HEIGHT))
+    stretched = cv2.normalize(small, None, 0, 255, cv2.NORM_MINMAX)
     return cv2.Laplacian(stretched, cv2.CV_64F).var() >= SHARPNESS_THRESHOLD
 
 
@@ -119,16 +139,66 @@ def _bilinear_sample(field, x, y):
     return top + (bottom - top) * wy
 
 
-def estimate_global_light_angle(gray):
-    """The raking light is a single, page-wide source, so its direction is
-    estimated once per image from the coarse dark-to-light gradient it casts
-    across the whole page, rather than per dot."""
-    h, w = gray.shape
-    sigma = max(h, w) / LIGHT_DIRECTION_BLUR_DIVISOR
-    blurred = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), sigma)
-    gx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
-    gy = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
-    return float(np.arctan2(gy.sum(), gx.sum()))
+def _sample_ring_direction_vector(relative, cx, cy, r):
+    """Each candidate dot's own ring is a clean read of its bump's
+    bright-to-dark axis: sampling only reaches pixels within EDGE_SAMPLE's
+    band around that one dot, so it can't pick up a page-wide brightness
+    blob. Returns a (vx, vy) vector: the angle a real embossed dot's own
+    brightness peaks toward, weighted by how pronounced that peak is (a
+    near-flat ring, e.g. from a false-positive candidate, contributes little).
+    """
+    inner = r * EDGE_SAMPLE_INNER_RADIUS_MULTIPLE
+    outer = r * EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE
+    steps = EDGE_SAMPLE_RADIAL_STEPS
+    samples = DOT_DIRECTION_ANGLE_SAMPLES
+    values = np.empty(samples, dtype=np.float64)
+    for a in range(samples):
+        theta = (a / samples) * 2 * np.pi
+        total = 0.0
+        for s in range(steps):
+            frac = 0.5 if steps == 1 else s / (steps - 1)
+            sample_r = inner + frac * (outer - inner)
+            sx = cx + np.cos(theta) * sample_r
+            sy = cy + np.sin(theta) * sample_r
+            total += _bilinear_sample(relative, sx, sy)
+        values[a] = total / steps
+
+    mean = values.mean()
+    vx = 0.0
+    vy = 0.0
+    for a in range(samples):
+        theta = (a / samples) * 2 * np.pi
+        weight = values[a] - mean
+        vx += np.cos(theta) * weight
+        vy += np.sin(theta) * weight
+    return vx, vy
+
+
+def estimate_consensus_light_angle(relative, points, radii):
+    """A single sum-then-arctan2 over the whole frame's own pixel gradient -
+    or a smoothed field of it - conflates the raking light's genuinely subtle
+    shading with any large, unrelated brightness contrast the frame happens
+    to contain: the page sitting on a darker table, a printed logo, a shadow.
+    That contrast is far stronger than the light's own gradient, so it
+    dominates the estimate. Measured on a real capture with a visible
+    page/table boundary, plotting that frame-gradient direction as a hue
+    wheel across the image showed a textbook vortex centered on the page -
+    i.e. it was reading "which way is the brighter paper from here", not the
+    actual light source, which misclassified every dot near that boundary.
+
+    Since real embossed dots on one page are physically bumps of one
+    consistent handedness, summing every candidate's own ring axis (see
+    _sample_ring_direction_vector) into one consensus vector recovers the
+    true light direction for the whole page without ever touching a
+    page-level pixel gradient.
+    """
+    sum_x = 0.0
+    sum_y = 0.0
+    for (cx, cy), r in zip(points, radii):
+        vx, vy = _sample_ring_direction_vector(relative, cx, cy, r)
+        sum_x += vx
+        sum_y += vy
+    return float(np.arctan2(sum_y, sum_x))
 
 
 def local_relative_brightness(gray, sigma):
@@ -148,8 +218,9 @@ def local_relative_brightness(gray, sigma):
 
 
 def _sample_half_ring_brightness(relative, cx, cy, r, center_angle):
-    """Average locally-normalized brightness over the half of the dot's edge
-    ring centered on center_angle (a 180-degree wedge)."""
+    """Average locally-normalized brightness over the half of the dot's disc
+    centered on center_angle (a 180-degree wedge), sampled across most of the
+    disc's radius rather than just a thin band at the rim."""
     inner = r * EDGE_SAMPLE_INNER_RADIUS_MULTIPLE
     outer = r * EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE
     steps = EDGE_SAMPLE_RADIAL_STEPS
@@ -177,7 +248,7 @@ def classify_dot_polarity(gray, enhanced, points, radii):
 
     sigma = float(np.max(radii)) * LOCAL_BRIGHTNESS_SIGMA_RADIUS_MULTIPLE if len(radii) else 1.0
     relative = local_relative_brightness(enhanced, max(sigma, 1.0))
-    light_angle = estimate_global_light_angle(gray)
+    light_angle = estimate_consensus_light_angle(relative, points, radii)
 
     polarity = np.empty(len(points), dtype=bool)
     for i, ((cx, cy), r) in enumerate(zip(points, radii)):

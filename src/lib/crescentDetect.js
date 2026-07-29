@@ -14,6 +14,12 @@ const MAX_ACCUMULATOR_DP = 2.0
 const ACCUMULATOR_DP_RADIUS_CONSTANT = 20
 const MIN_DIST_RADIUS_MULTIPLE = 1.1
 const MIN_RING_SUPPORT = 0.3
+// Raising this floor to cut noise-driven false hits on blank paper was tried
+// and reverted: two real dots that touch or sit close together (routine
+// within a Braille cell) partially cancel each other's ring gradient on the
+// side they share, so a genuine adjacent-pair dot can score as low as a
+// flat-paper noise blob - there's no vote count that separates the two
+// without also dropping real touching dots.
 const MIN_RING_VOTES_ABSOLUTE = 14
 const ARC_SECTORS = 16
 // Real crescents are lit from one direction, so their edge support forms a single
@@ -375,6 +381,17 @@ function nonMaxSuppress(mag, gx, gy, width, height) {
   return out
 }
 
+const PITCH_BUCKET_MIN_SUPPORT = 2
+
+// The base dot pitch is the *smallest* recurring spacing, not the most common
+// one: GRID_PITCH_MULTIPLES already predicts that diagonal and cross-cell
+// neighbors reproduce that base spacing at several larger multiples (a
+// roughly-square dot grid puts about as many pairs at the sqrt(2) diagonal as
+// at the base spacing itself, and a partial-frame capture - most of a Braille
+// photo - only ever shows a couple of dots close enough to register the base
+// spacing directly). Picking the most-populous bucket instead regularly
+// locks onto one of those multiples rather than the base unit, which then
+// rejects the very pairs the multiple was derived from as "off-grid".
 function estimateGridPitch(nnDistances) {
   const finite = nnDistances.filter((d) => Number.isFinite(d)).sort((a, b) => a - b)
   if (finite.length === 0) return null
@@ -387,6 +404,8 @@ function estimateGridPitch(nnDistances) {
     const key = Math.round(d / bucketSize)
     counts.set(key, (counts.get(key) || 0) + 1)
   }
+
+  let smallestSupportedKey = null
   let bestKey = null
   let bestCount = 0
   for (const [key, count] of counts) {
@@ -394,8 +413,13 @@ function estimateGridPitch(nnDistances) {
       bestCount = count
       bestKey = key
     }
+    if (count >= PITCH_BUCKET_MIN_SUPPORT && (smallestSupportedKey === null || key < smallestSupportedKey)) {
+      smallestSupportedKey = key
+    }
   }
-  return bestKey === null ? null : bestKey * bucketSize
+
+  const chosenKey = smallestSupportedKey === null ? bestKey : smallestSupportedKey
+  return chosenKey === null ? null : chosenKey * bucketSize
 }
 
 function nearestNeighborDistances(circles) {
@@ -435,6 +459,68 @@ function filterOutInk(circles, equalized, width, height) {
     }
     return min >= MIN_DISC_BRIGHTNESS
   })
+}
+
+const MIN_CANDIDATES_FOR_RELIEF_FILTER = 6
+const RELIEF_GAP_RATIO = 1.4
+const RELIEF_LOWER_SEARCH_FRACTION = 0.5
+const MIN_RELIEF_CUT_COUNT = 2
+
+// A genuine embossed dot's disc spans both its lit and shadowed sides, so even
+// a shallow bump swings across a wide chunk of the 0-255 range in the raw
+// (non-normalized) CLAHE-equalized image. Flat paper grain and JPEG blocking
+// can still rack up enough Hough ring votes to clear the filters above (see
+// MIN_RING_VOTES_ABSOLUTE) without ever producing that swing, since there's no
+// physical relief under them to shade.
+//
+// A fixed floor on that swing doesn't transfer across photos - CLAHE's tile
+// size and clip limit, and therefore the achievable contrast range, both move
+// with image resolution and detected dot radius - so this instead looks for a
+// sharp low-relief tail within the *same* photo's own candidates: sort by
+// swing, and cut below the steepest proportional jump, but only when that jump
+// is both unambiguous (RELIEF_GAP_RATIO) and separates off more than a single
+// candidate (MIN_RELIEF_CUT_COUNT), so a single dim-but-real dot near a frame
+// edge isn't mistaken for the tail of a noise cluster. A photo with no such
+// jump (real dots and noise both absent, or contrast genuinely uniform) is
+// left untouched.
+function filterByLocalRelief(circles, equalized, width, height) {
+  if (circles.length < MIN_CANDIDATES_FOR_RELIEF_FILTER) return circles
+
+  const withRange = circles.map((circle) => {
+    const r = Math.round(circle.r)
+    let min = 255
+    let max = 0
+    for (let dy = -r; dy <= r; dy += 1) {
+      const yy = Math.max(0, Math.min(height - 1, Math.round(circle.cy + dy)))
+      for (let dx = -r; dx <= r; dx += 1) {
+        if (dx * dx + dy * dy > r * r) continue
+        const xx = Math.max(0, Math.min(width - 1, Math.round(circle.cx + dx)))
+        const v = equalized[yy * width + xx]
+        if (v < min) min = v
+        if (v > max) max = v
+      }
+    }
+    return { circle, range: max - min }
+  })
+  withRange.sort((a, b) => a.range - b.range)
+
+  const searchLimit = Math.max(MIN_RELIEF_CUT_COUNT, Math.floor(withRange.length * RELIEF_LOWER_SEARCH_FRACTION))
+  let cutIndex = -1
+  let bestRatio = RELIEF_GAP_RATIO
+  for (let i = MIN_RELIEF_CUT_COUNT; i <= searchLimit; i += 1) {
+    const prev = withRange[i - 1].range
+    const curr = withRange[i].range
+    if (prev <= 0) continue
+    const ratio = curr / prev
+    if (ratio >= bestRatio) {
+      bestRatio = ratio
+      cutIndex = i
+    }
+  }
+  if (cutIndex < 0) return circles
+
+  const kept = withRange.slice(cutIndex).map((entry) => entry.circle)
+  return kept.length > 0 ? kept : circles
 }
 
 const MIN_CANDIDATES_FOR_RADIUS_FILTER = 4
@@ -577,33 +663,83 @@ function filterByLightProfile(circles, relative, width, height) {
   return kept.length > 0 ? kept : circles
 }
 
-const EDGE_SAMPLE_INNER_RADIUS_MULTIPLE = 0.85
-const EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE = 1.3
-const EDGE_SAMPLE_RADIAL_STEPS = 4
+// Sampling this close to the rim (previously 0.85-1.3r) put most of the band on or
+// past the dot's own boundary, averaging in the flat paper beside it rather than the
+// dome's own shading - which is strong across the whole disc, not just a thin ring at
+// the edge. A human glancing at the same dot reads the shading across its full lit
+// half, so the sample region now spans most of the disc's interior instead of just
+// hugging the rim.
+const EDGE_SAMPLE_INNER_RADIUS_MULTIPLE = 0.15
+const EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE = 0.95
+const EDGE_SAMPLE_RADIAL_STEPS = 6
 const EDGE_SAMPLE_HALF_ANGLE_SAMPLES = 16
-const LIGHT_DIRECTION_BLUR_DIVISOR = 6
+const DOT_DIRECTION_ANGLE_SAMPLES = 24
 
-// The raking light used to photograph an embossed page is a single, page-wide
-// source, so its direction is estimated once for the whole frame rather than per
-// dot. Blurring well past dot scale strips out the crescent shading itself (that's
-// the signal classifyDotDirection reads per-dot) and leaves only the coarse
-// dark-to-light gradient the light casts across the paper as a whole.
-function estimateGlobalLightAngle(gray, width, height) {
-  const sigma = Math.max(width, height) / LIGHT_DIRECTION_BLUR_DIVISOR
-  const blurred = gaussianBlur(gray, width, height, sigma)
-  const { gx, gy } = sobelGradient(blurred, width, height)
+// Deriving "light direction" from the page's own pixel gradients - whether as
+// one frame-wide sum or a smoothed per-pixel field - conflates the raking
+// light's genuinely subtle shading with any large, unrelated brightness
+// contrast the frame happens to contain: the page sitting on a darker table,
+// a printed logo, a shadow. That contrast is far stronger than the light's own
+// gradient, so it dominates the estimate. Measured on a real capture (a photo
+// with a visible page/table boundary), plotting this frame-gradient approach's
+// direction as a hue wheel across the image showed a textbook vortex
+// centered on the page - i.e. the "light direction" it read at any point was
+// mostly just "which way is the brighter paper from here", telling us nothing
+// about the actual light source and actively misleading dots that sit near
+// that boundary.
+//
+// Each candidate dot's own ring, by contrast, is a clean read of its bump's
+// bright-to-dark axis: bilinearSample only reaches pixels within EDGE_SAMPLE's
+// band around that one dot, so it can't pick up a page-wide brightness blob.
+// Since real embossed dots on one page are physically bumps of one consistent
+// handedness, summing every candidate's own axis (weighted by how pronounced
+// that axis is) into one consensus vector recovers the true light direction
+// for the whole page without ever touching a page-level pixel gradient.
+function sampleRingDirectionVector(relative, width, height, cx, cy, r) {
+  const values = new Float32Array(DOT_DIRECTION_ANGLE_SAMPLES)
+  for (let a = 0; a < DOT_DIRECTION_ANGLE_SAMPLES; a += 1) {
+    const theta = (a / DOT_DIRECTION_ANGLE_SAMPLES) * Math.PI * 2
+    let sum = 0
+    for (let s = 0; s < EDGE_SAMPLE_RADIAL_STEPS; s += 1) {
+      const frac = EDGE_SAMPLE_RADIAL_STEPS === 1 ? 0.5 : s / (EDGE_SAMPLE_RADIAL_STEPS - 1)
+      const sampleR =
+        r * (EDGE_SAMPLE_INNER_RADIUS_MULTIPLE + frac * (EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE - EDGE_SAMPLE_INNER_RADIUS_MULTIPLE))
+      const sx = cx + Math.cos(theta) * sampleR
+      const sy = cy + Math.sin(theta) * sampleR
+      sum += bilinearSample(relative, width, height, sx, sy)
+    }
+    values[a] = sum / EDGE_SAMPLE_RADIAL_STEPS
+  }
+
+  let mean = 0
+  for (let a = 0; a < values.length; a += 1) mean += values[a]
+  mean /= values.length
+
+  let vx = 0
+  let vy = 0
+  for (let a = 0; a < values.length; a += 1) {
+    const theta = (a / values.length) * Math.PI * 2
+    const weight = values[a] - mean
+    vx += Math.cos(theta) * weight
+    vy += Math.sin(theta) * weight
+  }
+  return { vx, vy }
+}
+
+function estimateConsensusLightAngle(circles, relative, width, height) {
   let sumX = 0
   let sumY = 0
-  for (let i = 0; i < gx.length; i += 1) {
-    sumX += gx[i]
-    sumY += gy[i]
+  for (const circle of circles) {
+    const { vx, vy } = sampleRingDirectionVector(relative, width, height, circle.cx, circle.cy, circle.r)
+    sumX += vx
+    sumY += vy
   }
   return Math.atan2(sumY, sumX)
 }
 
-// Averages the locally-normalized brightness over the half of the dot's edge ring
-// centered on centerAngle (a 180-degree wedge), sampled across a small radial band
-// straddling the rim so the crescent itself - not the flat paper beyond it - is what
+// Averages the locally-normalized brightness over the half of the dot's disc
+// centered on centerAngle (a 180-degree wedge), sampled across most of the disc's
+// radius so the dome's shading as a whole - not just a thin slice of it - is what
 // gets measured.
 function sampleHalfRingBrightness(relative, width, height, cx, cy, r, centerAngle) {
   let sum = 0
@@ -644,6 +780,39 @@ function classifyDotDirection(circles, relative, width, height, lightAngle) {
     )
     return { ...circle, facingCamera: towardLight > awayFromLight }
   })
+}
+
+// Half the ring (8 of 16 sectors) is what a dot sitting flush against a
+// single frame edge keeps in view. A corner candidate - clipped on two sides
+// at once - can only ever reach 5-6/16, and at that point there's too little
+// of the ring left to tell a genuine corner-clipped dot from a noise blob
+// that happened to accumulate a few votes (confirmed against a real photo:
+// relaxing the bar down to 6/16 let through a corner "candidate" with no
+// visible dot in the source image at all, and its low relief score also
+// dragged down the local-relief filter's noise-tail cutoff for a real
+// dot elsewhere in the same frame - see filterByLocalRelief). Pinning the
+// floor at exactly half keeps single-edge crops like the two above eligible
+// while excluding corners.
+const MIN_VISIBLE_SECTORS_FOR_BORDER_RELIEF = ARC_SECTORS / 2
+
+// A dot photographed right at the frame's edge has part of its ring cut off
+// by the image boundary itself, not by anything ambiguous about whether it's
+// a real dot - there is simply no pixel out there to vote. Judging such a
+// candidate against MIN_RING_VOTES_ABSOLUTE/MIN_ARC_SECTORS, both defined
+// against the full 360-degree ring, rejects it purely for sitting at the
+// edge of the photo. Below MIN_VISIBLE_SECTORS_FOR_BORDER_RELIEF sectors of
+// actual geometric visibility, though, too little of the ring remains in
+// frame to distinguish a genuine clipped dot from noise near the border, so
+// those candidates still face the full, unscaled requirement.
+function visibleSectorCount(cx, cy, r, width, height, numSectors) {
+  let count = 0
+  for (let s = 0; s < numSectors; s += 1) {
+    const theta = ((s + 0.5) / numSectors) * Math.PI * 2 - Math.PI
+    const px = cx + Math.cos(theta) * r
+    const py = cy + Math.sin(theta) * r
+    if (px >= 0 && px <= width - 1 && py >= 0 && py <= height - 1) count += 1
+  }
+  return count
 }
 
 function longestCircularRun(mask, numSectors) {
@@ -727,14 +896,33 @@ function houghCircleVote(mag, gx, gy, width, height, { minRadius, maxRadius, dp,
     let bestFrac = 0
     let bestArcVal = 0
     const base = cell * numR
+    const ax = cell % accW
+    const ay = (cell / accW) | 0
+    const cx = ax * dp
+    const cy = ay * dp
     for (let ri = 0; ri < numR; ri += 1) {
-      const count = pooled[base + ri]
-      if (count < MIN_RING_VOTES_ABSOLUTE) continue
       const r = radii[ri]
-      const fraction = count / (2 * Math.PI * r)
+      const count = pooled[base + ri]
+
+      let requiredVotes = MIN_RING_VOTES_ABSOLUTE
+      let requiredArc = MIN_ARC_SECTORS
+      let ringCircumference = 2 * Math.PI * r
+      const fullyInFrame = cx - r >= 0 && cx + r <= width - 1 && cy - r >= 0 && cy + r <= height - 1
+      if (!fullyInFrame) {
+        const visible = visibleSectorCount(cx, cy, r, width, height, ARC_SECTORS)
+        if (visible >= MIN_VISIBLE_SECTORS_FOR_BORDER_RELIEF) {
+          const visibleFraction = visible / ARC_SECTORS
+          requiredVotes = Math.max(1, Math.round(MIN_RING_VOTES_ABSOLUTE * visibleFraction))
+          requiredArc = Math.max(1, Math.round(MIN_ARC_SECTORS * visibleFraction))
+          ringCircumference *= visibleFraction
+        }
+      }
+
+      if (count < requiredVotes) continue
+      const fraction = count / ringCircumference
       if (fraction < MIN_RING_SUPPORT) continue
       const arc = longestCircularRun(pooledMask[base + ri], ARC_SECTORS)
-      if (arc < MIN_ARC_SECTORS) continue
+      if (arc < requiredArc) continue
       if (count > best) {
         best = count
         bestR = r
@@ -845,9 +1033,10 @@ export function detectCrescentCircles(imageData) {
   })
 
   const inkFiltered = filterOutInk(circles, equalized, width, height)
-  const shapeFiltered = filterToGrid(filterToRadiusMode(inkFiltered))
+  const reliefFiltered = filterByLocalRelief(inkFiltered, equalized, width, height)
+  const shapeFiltered = filterToGrid(filterToRadiusMode(reliefFiltered))
   const lightFiltered = filterByLightProfile(shapeFiltered, relative, width, height)
-  const lightAngle = estimateGlobalLightAngle(gray, width, height)
+  const lightAngle = estimateConsensusLightAngle(lightFiltered, relative, width, height)
   const classified = classifyDotDirection(lightFiltered, relative, width, height, lightAngle)
   return classified.map(({ cx, cy, r, facingCamera }) => ({ cx, cy, r, facingCamera }))
 }

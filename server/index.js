@@ -117,9 +117,9 @@ function friendlySudoMessage(err) {
     : err.message
 }
 
-function runLong(cmd, args, timeoutMs) {
+function runLong(cmd, args, timeoutMs, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args)
+    const child = spawn(cmd, args, { env: { ...process.env, ...extraEnv } })
     let stdout = ''
     let stderr = ''
 
@@ -529,12 +529,14 @@ app.get('/api/output/images', async (_req, res) => {
   res.json({ count: images.length, images })
 })
 
-app.post('/api/compile', async (_req, res) => {
+app.post('/api/compile', async (req, res) => {
+  const { keepRaw } = req.body ?? {}
+  const extraEnv = keepRaw ? { COMPILE_KEEP_RAW: '1' } : {}
   let lastErr = new Error('No Python interpreter found (tried python3, python).')
 
   for (const bin of PYTHON_BINARIES) {
     try {
-      const stdout = await runLong(bin, [COMPILE_SCRIPT], COMPILE_TIMEOUT_MS)
+      const stdout = await runLong(bin, [COMPILE_SCRIPT], COMPILE_TIMEOUT_MS, extraEnv)
       res.json({ success: true, output: stdout.trim() })
       return
     } catch (err) {

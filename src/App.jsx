@@ -103,6 +103,7 @@ function App() {
   const [compileError, setCompileError] = useState('')
   const [compileStatus, setCompileStatus] = useState('')
   const [imagesPopup, setImagesPopup] = useState(null)
+  const [keepRawDebug, setKeepRawDebug] = useState(false)
   const settingsRef = useRef(null)
   const modelViewerRef = useRef(null)
 
@@ -494,11 +495,17 @@ function App() {
       // dot-alignment stitch (polarization-aware, see server/compile.py) runs
       // server-side against the same stored images and writes merged pieces to output/.
       let stitched = []
+      let stitchLog = ''
       setCompileStatus('Stitching braille surface…')
       try {
-        const compileResponse = await fetch('/api/compile', { method: 'POST' })
+        const compileResponse = await fetch('/api/compile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keepRaw: keepRawDebug }),
+        })
         const compileData = await compileResponse.json()
         if (!compileResponse.ok) throw new Error(compileData.message || 'Stitching failed.')
+        stitchLog = compileData.output || ''
 
         const outputResponse = await fetch('/api/output/images')
         const outputData = await outputResponse.json()
@@ -516,7 +523,7 @@ function App() {
         await fetch('/api/images', { method: 'DELETE' }).catch(() => {})
       }
 
-      setImagesPopup({ images: matches, stitched })
+      setImagesPopup({ images: matches, stitched, stitchLog })
     } catch (err) {
       setCompileError(err.message || 'Compile failed.')
     } finally {
@@ -727,6 +734,15 @@ function App() {
             </div>
             <div className={`rounded-xl border p-2 ${themePalette.surface}`}>
               <p className={`text-[10px] uppercase ${themePalette.muted}`}>Compile</p>
+              <label className={`mt-2 flex items-center gap-1.5 text-xs ${themePalette.muted}`}>
+                <input
+                  type="checkbox"
+                  checked={keepRawDebug}
+                  onChange={(event) => setKeepRawDebug(event.target.checked)}
+                  className="cursor-pointer"
+                />
+                Archive raw captures to raw_debug/ before stitching
+              </label>
               <button
                 type="button"
                 onClick={handleCompile}
@@ -1340,6 +1356,17 @@ function App() {
                   </div>
                 )}
               </div>
+
+              {imagesPopup.stitchLog && (
+                <div>
+                  <p className={`text-xs font-semibold uppercase ${themePalette.muted}`}>
+                    Stitch log
+                  </p>
+                  <pre className={`mt-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap rounded-lg border p-2 text-[11px] leading-snug ${themePalette.outline} ${themePalette.secondary}`}>
+                    {imagesPopup.stitchLog}
+                  </pre>
+                </div>
+              )}
 
               <div>
                 <p className={`text-xs font-semibold uppercase ${themePalette.muted}`}>

@@ -27,7 +27,9 @@ independent check that a merely periodic mismatch can't satisfy by accident.
 """
 import glob
 import os
+import shutil
 import sys
+import time
 from collections import defaultdict
 
 import cv2
@@ -36,6 +38,12 @@ import numpy as np
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR = os.path.join(SERVER_DIR, '..', 'raspimages')
 OUTPUT_DIR = os.path.join(SERVER_DIR, '..', 'output')
+RAW_DEBUG_DIR = os.path.join(SERVER_DIR, '..', 'raw_debug')
+# clean_dir(INPUT_DIR) below deletes every raw still once it's been read, so a
+# run's true inputs are otherwise unrecoverable for offline tuning. Set
+# COMPILE_KEEP_RAW=1 (see server/index.js's /api/compile handler) to archive
+# an untouched copy of this run's raw captures before that cleanup runs.
+KEEP_RAW_COPIES = os.environ.get('COMPILE_KEEP_RAW') == '1'
 
 SHARPNESS_THRESHOLD = 100.0   # variance of Laplacian; below this, image is too blurry
 # Laplacian variance scales with resolution (more pixels means more high-frequency
@@ -464,23 +472,38 @@ def main():
         p for p in glob.glob(os.path.join(INPUT_DIR, '*')) if os.path.isfile(p)
     )
 
+    if KEEP_RAW_COPIES and input_paths:
+        run_dir = os.path.join(RAW_DEBUG_DIR, time.strftime('%Y%m%d-%H%M%S'))
+        os.makedirs(run_dir, exist_ok=True)
+        for p in input_paths:
+            shutil.copy2(p, os.path.join(run_dir, os.path.basename(p)))
+        print(f'Archived {len(input_paths)} raw capture(s) to {run_dir}')
+
     seeded = 0
     expanded = 0
-    skipped = 0
+    skipped_unreadable = 0
+    skipped_blurry = 0
+    skipped_skewed = 0
     dots_cache = {}  # output path -> detected dot centers, invalidated on write
+    log_lines = []
 
     for path in input_paths:
+        name = os.path.basename(path)
         img = cv2.imread(path)
         if img is None:
-            skipped += 1
+            skipped_unreadable += 1
+            log_lines.append(f'{name}: skipped (unreadable file)')
             continue
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         if not is_sharp(gray):
-            skipped += 1
+            skipped_blurry += 1
+            log_lines.append(f'{name}: skipped (too blurry)')
             continue
-        if abs(skew_angle(gray)) > MAX_ANGLE_DEGREES:
-            skipped += 1
+        angle = skew_angle(gray)
+        if abs(angle) > MAX_ANGLE_DEGREES:
+            skipped_skewed += 1
+            log_lines.append(f'{name}: skipped (skew {angle:.1f} deg > {MAX_ANGLE_DEGREES})')
             continue
 
         new_points, new_polarity = detect_dots(gray)
@@ -490,6 +513,7 @@ def main():
         )
 
         merged = False
+        best_inliers = 0
         for out_path in output_paths:
             out_img = cv2.imread(out_path)
             if out_img is None:
@@ -501,6 +525,7 @@ def main():
             out_points, out_polarity = dots_cache[out_path]
 
             m, inliers = estimate_dot_alignment(new_points, new_polarity, out_points, out_polarity)
+            best_inliers = max(best_inliers, inliers)
             if m is None or inliers < MIN_DOT_MATCHES:
                 continue
 
@@ -510,18 +535,34 @@ def main():
                 del dots_cache[out_path]
                 merged = True
                 expanded += 1
+                log_lines.append(
+                    f'{name}: merged into {os.path.basename(out_path)} '
+                    f'({inliers} dot matches, {len(new_points)} dots detected)'
+                )
                 break
 
         if not merged:
             seeded += 1
             out_name = f'piece_{seeded:04d}.jpg'
             cv2.imwrite(os.path.join(OUTPUT_DIR, out_name), img)
+            if output_paths:
+                log_lines.append(
+                    f'{name}: seeded as {out_name} (no match against {len(output_paths)} '
+                    f'existing piece(s); best was {best_inliers}/{MIN_DOT_MATCHES} dot matches, '
+                    f'{len(new_points)} dots detected in this image)'
+                )
+            else:
+                log_lines.append(f'{name}: seeded as {out_name} (first piece, {len(new_points)} dots detected)')
 
     clean_dir(INPUT_DIR)
 
+    for line in log_lines:
+        print(line)
     print(
         f'Processed {len(input_paths)} image(s): '
-        f'{seeded} seeded, {expanded} expanded, {skipped} skipped.'
+        f'{seeded} seeded, {expanded} expanded, '
+        f'{skipped_blurry} too blurry, {skipped_skewed} too skewed, '
+        f'{skipped_unreadable} unreadable.'
     )
 
 

@@ -482,7 +482,6 @@ function App() {
         matches.push({ name: image.name, data: annotatedData })
       }
 
-      setImagesPopup({ images: matches })
       setCompileProgress((value) => Math.min(100, value + 18))
 
       if (matches.length > 0) {
@@ -491,7 +490,33 @@ function App() {
         downloadBlob(zipBlob, `braille-scan-${Date.now()}.zip`)
       }
 
-      await fetch('/api/images', { method: 'DELETE' }).catch(() => {})
+      // The crescent pass above only previews/filters the raw captures; the actual
+      // dot-alignment stitch (polarization-aware, see server/compile.py) runs
+      // server-side against the same stored images and writes merged pieces to output/.
+      let stitched = []
+      setCompileStatus('Stitching braille surface…')
+      try {
+        const compileResponse = await fetch('/api/compile', { method: 'POST' })
+        const compileData = await compileResponse.json()
+        if (!compileResponse.ok) throw new Error(compileData.message || 'Stitching failed.')
+
+        const outputResponse = await fetch('/api/output/images')
+        const outputData = await outputResponse.json()
+        stitched = outputData.images ?? []
+
+        if (stitched.length > 0) {
+          setCompileStatus(`Zipping ${stitched.length} stitched piece${stitched.length === 1 ? '' : 's'}…`)
+          const stitchedZip = createZipBlob(stitched.map((image) => ({ name: image.name, data: base64ToBytes(image.data) })))
+          downloadBlob(stitchedZip, `braille-stitched-${Date.now()}.zip`)
+        }
+      } catch (err) {
+        setCompileError(err.message || 'Stitching failed.')
+        // compile.py cleans raspimages/ itself once it runs; only needed here
+        // because it never got that far.
+        await fetch('/api/images', { method: 'DELETE' }).catch(() => {})
+      }
+
+      setImagesPopup({ images: matches, stitched })
     } catch (err) {
       setCompileError(err.message || 'Compile failed.')
     } finally {
@@ -714,7 +739,7 @@ function App() {
               {compileError && <p className="mt-1.5 text-xs text-red-400">{compileError}</p>}
               {!compileError && (
                 <p className={`mt-1.5 text-xs ${themePalette.muted}`}>
-                  Checks each stored image for sharpness (&ge;{COMPILE_MIN_SHARPNESS_PERCENT}%) and dot crescents, then zips and downloads the matches.
+                  Checks each stored image for sharpness (&ge;{COMPILE_MIN_SHARPNESS_PERCENT}%) and dot crescents, then stitches the matches into a polarization-aligned surface and downloads both.
                 </p>
               )}
             </div>
@@ -1275,7 +1300,7 @@ function App() {
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center justify-between">
-              <p className={`text-sm font-semibold ${themePalette.text}`}>Crescent matches ({imagesPopup.images.length})</p>
+              <p className={`text-sm font-semibold ${themePalette.text}`}>Compile results</p>
               <button
                 type="button"
                 onClick={() => setImagesPopup(null)}
@@ -1285,27 +1310,64 @@ function App() {
                 <X className="h-3.5 w-3.5" strokeWidth={2.25} />
               </button>
             </div>
-            {imagesPopup.images.length === 0 ? (
-              <p className={`mt-3 text-sm ${themePalette.secondary}`}>No stored images were both sharp enough and had detectable dot crescents.</p>
-            ) : (
-              <div className="mt-3 grid max-h-[70vh] grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3">
-                {imagesPopup.images.map((image) => (
-                  <a
-                    key={image.name}
-                    href={`data:image/jpeg;base64,${image.data}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className={`block overflow-hidden rounded-xl border ${themePalette.outline}`}
-                  >
-                    <img
-                      src={`data:image/jpeg;base64,${image.data}`}
-                      alt={image.name}
-                      className="h-28 w-full object-cover"
-                    />
-                  </a>
-                ))}
+
+            <div className="mt-3 max-h-[70vh] space-y-4 overflow-y-auto">
+              <div>
+                <p className={`text-xs font-semibold uppercase ${themePalette.muted}`}>
+                  Stitched surface ({(imagesPopup.stitched ?? []).length})
+                </p>
+                {(imagesPopup.stitched ?? []).length === 0 ? (
+                  <p className={`mt-1.5 text-sm ${themePalette.secondary}`}>
+                    No pieces came out of the polarization-aware dot-alignment stitch.
+                  </p>
+                ) : (
+                  <div className="mt-1.5 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                    {imagesPopup.stitched.map((image) => (
+                      <a
+                        key={image.name}
+                        href={`data:image/jpeg;base64,${image.data}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className={`block overflow-hidden rounded-xl border ${themePalette.outline}`}
+                      >
+                        <img
+                          src={`data:image/jpeg;base64,${image.data}`}
+                          alt={image.name}
+                          className="h-28 w-full object-cover"
+                        />
+                      </a>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
+
+              <div>
+                <p className={`text-xs font-semibold uppercase ${themePalette.muted}`}>
+                  Crescent matches ({imagesPopup.images.length})
+                </p>
+                {imagesPopup.images.length === 0 ? (
+                  <p className={`mt-1.5 text-sm ${themePalette.secondary}`}>No stored images were both sharp enough and had detectable dot crescents.</p>
+                ) : (
+                  <div className="mt-1.5 grid grid-cols-2 gap-2 sm:grid-cols-3">
+                    {imagesPopup.images.map((image) => (
+                      <a
+                        key={image.name}
+                        href={`data:image/jpeg;base64,${image.data}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className={`block overflow-hidden rounded-xl border ${themePalette.outline}`}
+                      >
+                        <img
+                          src={`data:image/jpeg;base64,${image.data}`}
+                          alt={image.name}
+                          className="h-28 w-full object-cover"
+                        />
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       )}

@@ -1,10 +1,12 @@
 """Builds a composite of the scanned Braille surface out of the raw camera stills.
 
 Pipeline: clean output/ -> for each image in input/, skip it unless it's sharp
-and near-flat (<5 deg skew) -> detect the braille dot centers in it -> try to
-align it onto an existing output image by finding a rotation+translation that
-lines up enough of its dots with that image's dots -> if nothing correlates,
-seed a new output image with it -> clean input/.
+and near-flat (<5 deg skew) -> detect the braille dot centers in it, along
+with each dot's raking-light polarity (bump facing the camera vs. a dimple
+facing away, see classify_dot_polarity) -> try to align it onto an existing
+output image by finding a rotation+translation that lines up enough of its
+dots (position *and* polarity) with that image's dots -> if nothing
+correlates, seed a new output image with it -> clean input/.
 
 Alignment is done from the dot *positions* rather than generic ORB/SIFT
 features: a braille dot grid is highly repetitive texture, so descriptor
@@ -14,6 +16,14 @@ large set of points related by a single rigid transform (the camera only
 translates/rotates between shots, it doesn't warp the paper), so a RANSAC
 search over that transform is a much more direct fit for this data than
 feature descriptors are.
+
+Position alone is still ambiguous on a periodic grid: a transform that's off
+by exactly one dot pitch lines up almost as many points as the true one does,
+since every dot has a look-alike neighbor one pitch away in each direction.
+Each dot's polarity (see src/lib/crescentDetect.js's classifyDotDirection,
+which this mirrors) breaks that tie - it's read straight off the raking-light
+shading and doesn't depend on position at all, so requiring it to agree is an
+independent check that a merely periodic mismatch can't satisfy by accident.
 """
 import glob
 import os
@@ -36,6 +46,18 @@ MAX_ANGLE_DEGREES = 5.0       # max acceptable skew of the paper/text in frame
 DOT_MIN_RADIUS_FRACTION = 0.035
 DOT_MAX_RADIUS_FRACTION = 0.085
 MAX_DOTS_PER_IMAGE = 150      # bounds RANSAC cost; excess low-confidence circles are dropped
+
+# Polarity classification (bump-facing-camera vs. dimple-facing-away). Mirrors
+# the constants in src/lib/crescentDetect.js so the two readings of the same
+# physical dots agree.
+LOCAL_BRIGHTNESS_SIGMA_RADIUS_MULTIPLE = 1.6
+LOCAL_BRIGHTNESS_MIN_STD = 0.75
+LOCAL_BRIGHTNESS_CLIP_STD = 2.5
+LIGHT_DIRECTION_BLUR_DIVISOR = 6
+EDGE_SAMPLE_INNER_RADIUS_MULTIPLE = 0.85
+EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE = 1.3
+EDGE_SAMPLE_RADIAL_STEPS = 4
+EDGE_SAMPLE_HALF_ANGLE_SAMPLES = 16
 
 # Dot-based alignment (RANSAC over rigid transforms).
 MIN_DOT_MATCHES = 6           # aligned dot pairs required to call two images connected
@@ -83,8 +105,92 @@ def skew_angle(gray):
     return angle
 
 
+def _bilinear_sample(field, x, y):
+    h, w = field.shape
+    cx = min(max(x, 0.0), w - 1.001)
+    cy = min(max(y, 0.0), h - 1.001)
+    x0, y0 = int(cx), int(cy)
+    x1, y1 = x0 + 1, y0 + 1
+    wx, wy = cx - x0, cy - y0
+    v00, v01 = field[y0, x0], field[y0, x1]
+    v10, v11 = field[y1, x0], field[y1, x1]
+    top = v00 + (v01 - v00) * wx
+    bottom = v10 + (v11 - v10) * wx
+    return top + (bottom - top) * wy
+
+
+def estimate_global_light_angle(gray):
+    """The raking light is a single, page-wide source, so its direction is
+    estimated once per image from the coarse dark-to-light gradient it casts
+    across the whole page, rather than per dot."""
+    h, w = gray.shape
+    sigma = max(h, w) / LIGHT_DIRECTION_BLUR_DIVISOR
+    blurred = cv2.GaussianBlur(gray.astype(np.float32), (0, 0), sigma)
+    gx = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+    gy = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+    return float(np.arctan2(gy.sum(), gx.sum()))
+
+
+def local_relative_brightness(gray, sigma):
+    """Per-pixel brightness expressed as a clipped z-score against its own
+    local neighborhood, so shading is comparable across differently-lit
+    regions of the same page."""
+    gray_f = gray.astype(np.float32)
+    mean = cv2.GaussianBlur(gray_f, (0, 0), sigma)
+    mean_sq = cv2.GaussianBlur(gray_f * gray_f, (0, 0), sigma)
+    variance = np.maximum(0, mean_sq - mean * mean)
+    std = np.sqrt(variance)
+    clip = LOCAL_BRIGHTNESS_CLIP_STD
+    with np.errstate(divide='ignore', invalid='ignore'):
+        z = np.where(std > LOCAL_BRIGHTNESS_MIN_STD, (gray_f - mean) / std, 0.0)
+    z = np.clip(z, -clip, clip)
+    return ((z + clip) / (2 * clip)) * 255.0
+
+
+def _sample_half_ring_brightness(relative, cx, cy, r, center_angle):
+    """Average locally-normalized brightness over the half of the dot's edge
+    ring centered on center_angle (a 180-degree wedge)."""
+    inner = r * EDGE_SAMPLE_INNER_RADIUS_MULTIPLE
+    outer = r * EDGE_SAMPLE_OUTER_RADIUS_MULTIPLE
+    steps = EDGE_SAMPLE_RADIAL_STEPS
+    samples = EDGE_SAMPLE_HALF_ANGLE_SAMPLES
+    total = 0.0
+    for s in range(steps):
+        frac = 0.5 if steps == 1 else s / (steps - 1)
+        sample_r = inner + frac * (outer - inner)
+        for a in range(samples):
+            theta = center_angle - np.pi / 2 + ((a + 0.5) / samples) * np.pi
+            sx = cx + np.cos(theta) * sample_r
+            sy = cy + np.sin(theta) * sample_r
+            total += _bilinear_sample(relative, sx, sy)
+    return total / (steps * samples)
+
+
+def classify_dot_polarity(gray, enhanced, points, radii):
+    """For each dot, compare brightness on the side of its rim facing the
+    page's light source against the far side. A convex bump's near rim
+    catches the light directly and reads bright while its far rim
+    self-shadows; a concave dimple is the mirror image. Returns a bool array,
+    True where the dot reads as a bump facing the camera."""
+    if len(points) == 0:
+        return np.empty((0,), dtype=bool)
+
+    sigma = float(np.max(radii)) * LOCAL_BRIGHTNESS_SIGMA_RADIUS_MULTIPLE if len(radii) else 1.0
+    relative = local_relative_brightness(enhanced, max(sigma, 1.0))
+    light_angle = estimate_global_light_angle(gray)
+
+    polarity = np.empty(len(points), dtype=bool)
+    for i, ((cx, cy), r) in enumerate(zip(points, radii)):
+        toward = _sample_half_ring_brightness(relative, cx, cy, r, light_angle)
+        away = _sample_half_ring_brightness(relative, cx, cy, r, light_angle + np.pi)
+        polarity[i] = toward > away
+    return polarity
+
+
 def detect_dots(gray):
-    """Return an (N, 2) array of braille dot centers (x, y) in `gray`."""
+    """Return (points, polarity): an (N, 2) array of braille dot centers
+    (x, y) in `gray`, and a matching (N,) bool array of each dot's polarity
+    (see classify_dot_polarity)."""
     short = min(gray.shape)
     min_r = max(3, int(round(short * DOT_MIN_RADIUS_FRACTION)))
     max_r = max(min_r + 2, int(round(short * DOT_MAX_RADIUS_FRACTION)))
@@ -96,10 +202,12 @@ def detect_dots(gray):
         param1=80, param2=22, minRadius=min_r, maxRadius=max_r,
     )
     if circles is None:
-        return np.empty((0, 2), dtype=np.float64)
+        return np.empty((0, 2), dtype=np.float64), np.empty((0,), dtype=bool)
 
-    points = circles[0][:, :2].astype(np.float64)
-    return points[:MAX_DOTS_PER_IMAGE]
+    points = circles[0][:, :2].astype(np.float64)[:MAX_DOTS_PER_IMAGE]
+    radii = circles[0][:, 2].astype(np.float64)[:MAX_DOTS_PER_IMAGE]
+    polarity = classify_dot_polarity(gray, enhanced, points, radii)
+    return points, polarity
 
 
 def _similarity_from_pair(p1, p2, q1, q2):
@@ -122,17 +230,29 @@ def _apply_transform(m, points):
     return (m[:, :2] @ points.T).T + m[:, 2]
 
 
-def _count_inliers(m, pts_new, pts_base):
+def _count_inliers(m, pts_new, pts_base, pol_new, pol_base):
+    """A candidate correspondence only counts if, on top of landing within
+    POINT_MATCH_TOLERANCE_PX, its polarity agrees too. On a periodic grid the
+    nearest point by distance alone is often just the next dot over rather
+    than the true match, and a wrong-by-one-pitch transform can clear the
+    same distance tolerance as the true one over most of the grid - polarity
+    is read straight off the raking-light shading, independent of position,
+    so requiring it to agree as well rejects those false matches instead of
+    counting them as support for a bad transform."""
     transformed = _apply_transform(m, pts_new)
     dists = np.sqrt(((transformed[:, None, :] - pts_base[None, :, :]) ** 2).sum(axis=2))
+    if len(pol_new) and len(pol_base):
+        dists = np.where(pol_new[:, None] == pol_base[None, :], dists, np.inf)
     nearest_idx = dists.argmin(axis=1)
     nearest_dist = dists[np.arange(len(pts_new)), nearest_idx]
     mask = nearest_dist <= POINT_MATCH_TOLERANCE_PX
     return mask, nearest_idx
 
 
-def estimate_dot_alignment(pts_new, pts_base):
-    """Search for the rigid transform mapping `pts_new` onto `pts_base`.
+def estimate_dot_alignment(pts_new, pol_new, pts_base, pol_base):
+    """Search for the rigid transform mapping `pts_new` onto `pts_base`,
+    using each dot's polarity (bump vs. dimple, see classify_dot_polarity) to
+    disambiguate matches on top of position.
 
     Returns (matrix, inlier_count). matrix is a 2x3 array mapping points in
     the new image's pixel space into the base image's pixel space, or None
@@ -174,12 +294,17 @@ def estimate_dot_alignment(pts_new, pts_base):
         q1, q2 = pts_base[k], pts_base[l]
 
         # Two possible correspondences for a matched pair (q1,q2) vs (q2,q1);
-        # only one of them will explain the rest of the points.
-        for b1, b2 in ((q1, q2), (q2, q1)):
+        # only one of them will explain the rest of the points. A pivot
+        # assignment whose polarity doesn't even agree at the two pivot
+        # points can't be the right one, so it's skipped before spending a
+        # transform + full inlier count on it.
+        for b1, b2, pb1, pb2 in ((q1, q2, pol_base[k], pol_base[l]), (q2, q1, pol_base[l], pol_base[k])):
+            if pb1 != pol_new[i] or pb2 != pol_new[j]:
+                continue
             m = _similarity_from_pair(p1, p2, b1, b2)
             if m is None:
                 continue
-            mask, _ = _count_inliers(m, pts_new, pts_base)
+            mask, _ = _count_inliers(m, pts_new, pts_base, pol_new, pol_base)
             inliers = int(mask.sum())
             if inliers > best_inliers:
                 best_inliers = inliers
@@ -193,7 +318,7 @@ def estimate_dot_alignment(pts_new, pts_base):
         return None, best_inliers
 
     # Refine using every inlier correspondence, not just the two pivot points.
-    mask, nearest_idx = _count_inliers(best_m, pts_new, pts_base)
+    mask, nearest_idx = _count_inliers(best_m, pts_new, pts_base, pol_new, pol_base)
     if mask.sum() >= 3:
         refined, inlier_mask = cv2.estimateAffinePartial2D(
             pts_new[mask].astype(np.float32),
@@ -203,7 +328,7 @@ def estimate_dot_alignment(pts_new, pts_base):
         )
         if refined is not None:
             best_m = refined
-            best_inliers = int(_count_inliers(best_m, pts_new, pts_base)[0].sum())
+            best_inliers = int(_count_inliers(best_m, pts_new, pts_base, pol_new, pol_base)[0].sum())
 
     return best_m, best_inliers
 
@@ -287,7 +412,7 @@ def main():
             skipped += 1
             continue
 
-        new_dots = detect_dots(gray)
+        new_points, new_polarity = detect_dots(gray)
 
         output_paths = sorted(
             p for p in glob.glob(os.path.join(OUTPUT_DIR, '*')) if os.path.isfile(p)
@@ -302,9 +427,9 @@ def main():
             if out_path not in dots_cache:
                 out_gray = cv2.cvtColor(out_img, cv2.COLOR_BGR2GRAY)
                 dots_cache[out_path] = detect_dots(out_gray)
-            out_dots = dots_cache[out_path]
+            out_points, out_polarity = dots_cache[out_path]
 
-            m, inliers = estimate_dot_alignment(new_dots, out_dots)
+            m, inliers = estimate_dot_alignment(new_points, new_polarity, out_points, out_polarity)
             if m is None or inliers < MIN_DOT_MATCHES:
                 continue
 

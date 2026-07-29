@@ -36,8 +36,6 @@ const headerCaptions = {
 const translationSampleText = 'Hello, welcome to the Pi Translator.'
 const idealFocalDistanceCm = 4.8
 const COMPILE_MIN_SHARPNESS_PERCENT = 60
-const ADMIN_USERNAME = 'admin'
-const ADMIN_PASSWORD = 'password'
 const fallbackSystemCommands = [
   { id: 'reboot', label: 'Reboot device' },
   { id: 'poweroff', label: 'Power off device' },
@@ -90,9 +88,11 @@ function App() {
   const [systemStats, setSystemStats] = useState(null)
   const [cameraStats, setCameraStats] = useState(null)
   const [authenticated, setAuthenticated] = useState(false)
+  const [authToken, setAuthToken] = useState(null)
   const [authUsername, setAuthUsername] = useState('')
   const [authPassword, setAuthPassword] = useState('')
   const [authError, setAuthError] = useState('')
+  const [authSubmitting, setAuthSubmitting] = useState(false)
   const [systemCommands, setSystemCommands] = useState(fallbackSystemCommands)
   const [selectedCommand, setSelectedCommand] = useState('reboot')
   const [commandRunning, setCommandRunning] = useState(false)
@@ -527,19 +527,40 @@ function App() {
     }
   }
 
-  const handleLogin = (event) => {
+  const handleLogin = async (event) => {
     event.preventDefault()
-    if (authUsername === ADMIN_USERNAME && authPassword === ADMIN_PASSWORD) {
+    setAuthSubmitting(true)
+    setAuthError('')
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: authUsername, password: authPassword }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok || !data.success) {
+        setAuthError(data.message || 'Incorrect username or password.')
+        return
+      }
       setAuthenticated(true)
-      setAuthError('')
+      setAuthToken(data.token)
       setAuthPassword('')
-    } else {
-      setAuthError('Incorrect username or password.')
+    } catch (err) {
+      setAuthError(err.message || 'Sign-in failed.')
+    } finally {
+      setAuthSubmitting(false)
     }
   }
 
   const handleLogout = () => {
+    if (authToken) {
+      fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${authToken}` },
+      }).catch(() => {})
+    }
     setAuthenticated(false)
+    setAuthToken(null)
     setAuthUsername('')
     setAuthPassword('')
     setAuthError('')
@@ -576,6 +597,8 @@ function App() {
         themePalette={themePalette}
         checked={cameraChecked}
         available={cameraAvailable}
+        isAdmin={authenticated}
+        authToken={authToken}
         onStreamingChange={handleStreamingChange}
         onSharpness={handleSharpness}
         serverStreaming={cameraStats?.streaming ?? null}
@@ -1165,7 +1188,7 @@ function App() {
 
                   {authenticated ? (
                     <div className={`rounded-xl border p-2.5 ${themePalette.surface}`}>
-                      <p className={`text-sm ${themePalette.text}`}>Signed in as {ADMIN_USERNAME}</p>
+                      <p className={`text-sm ${themePalette.text}`}>Signed in as {authUsername || 'admin'}</p>
                       <p className={`mt-0.5 text-xs ${themePalette.muted}`}>Wi-Fi and system commands are unlocked.</p>
                       <button
                         type="button"
@@ -1197,9 +1220,10 @@ function App() {
                       {authError && <p className="text-xs text-red-400">{authError}</p>}
                       <button
                         type="submit"
-                        className={`flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition ${tone.button}`}
+                        disabled={authSubmitting}
+                        className={`flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${tone.button}`}
                       >
-                        <LogIn className="h-3.5 w-3.5" strokeWidth={2.25} />
+                        {authSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2.25} /> : <LogIn className="h-3.5 w-3.5" strokeWidth={2.25} />}
                         Sign in
                       </button>
                     </form>

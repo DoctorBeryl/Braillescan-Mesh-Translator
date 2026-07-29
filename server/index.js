@@ -5,6 +5,7 @@ import os from 'node:os'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import crypto from 'node:crypto'
 
 const WIFI_IFACE = 'wlan1'
 const PORT = process.env.WIFI_SERVER_PORT || 3001
@@ -41,16 +42,58 @@ const cameraStats = {
   frameTimestamps: [],
 }
 
-let cameraReleased = Promise.resolve()
-async function waitForCameraRelease() {
-  await Promise.race([
-    cameraReleased,
-    new Promise((resolve) => setTimeout(resolve, 3000)),
-  ])
-}
-
 const app = express()
 app.use(express.json({ limit: '10kb' }))
+
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin'
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'password'
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000
+const sessions = new Map()
+
+function createSession() {
+  const token = crypto.randomBytes(24).toString('hex')
+  sessions.set(token, Date.now() + SESSION_TTL_MS)
+  return token
+}
+
+function bearerToken(req) {
+  const header = req.get('authorization') || ''
+  return header.startsWith('Bearer ') ? header.slice(7) : null
+}
+
+function isValidSession(token) {
+  if (!token) return false
+  const expiresAt = sessions.get(token)
+  if (!expiresAt) return false
+  if (Date.now() > expiresAt) {
+    sessions.delete(token)
+    return false
+  }
+  return true
+}
+
+function requireAdmin(req, res, next) {
+  if (!isValidSession(bearerToken(req))) {
+    res.status(401).json({ message: 'Admin sign-in required.' })
+    return
+  }
+  next()
+}
+
+app.post('/api/auth/login', (req, res) => {
+  const { username, password } = req.body ?? {}
+  if (username !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
+    res.status(401).json({ success: false, message: 'Incorrect username or password.' })
+    return
+  }
+  res.json({ success: true, token: createSession() })
+})
+
+app.post('/api/auth/logout', (req, res) => {
+  const token = bearerToken(req)
+  if (token) sessions.delete(token)
+  res.json({ success: true })
+})
 
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
@@ -239,69 +282,174 @@ async function detectCamera() {
   return { available: false, videoBinary: null }
 }
 
-app.get('/api/camera/status', async (_req, res) => {
-  const { available } = await detectCamera()
-  res.json({ available })
-})
-
 const JPEG_SOI = Buffer.from([0xff, 0xd8])
 const JPEG_EOI = Buffer.from([0xff, 0xd9])
 
-app.get('/api/camera/stream', async (req, res) => {
-  const { available, videoBinary } = await detectCamera()
-  if (!available) {
-    res.status(503).json({ message: 'No camera detected.' })
+// A single rpicam-vid/libcamera-vid process is shared by every connected
+// viewer, and only an admin can start or stop it. This avoids spawning one
+// camera process per browser tab (the old per-request model), which was
+// prone to racing itself — e.g. two near-simultaneous requests (a React
+// StrictMode remount plus the "real" mount) could both try to grab the
+// camera device, leaving one connection with frames (and thus saved images)
+// and the other with none (a blank <img>).
+const cameraManager = {
+  enabled: false,
+  starting: false,
+  child: null,
+  subscribers: new Set(),
+}
+
+function broadcastFrame(frame) {
+  const head = `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\n\r\n`
+  for (const subscriber of cameraManager.subscribers) {
+    subscriber.write(head)
+    subscriber.write(frame)
+    subscriber.write('\r\n')
+  }
+}
+
+function endAllSubscribers() {
+  for (const subscriber of cameraManager.subscribers) {
+    if (!subscriber.writableEnded) subscriber.end()
+  }
+  cameraManager.subscribers.clear()
+}
+
+async function startCameraStream() {
+  if (cameraManager.enabled || cameraManager.starting) {
+    return { ok: true }
+  }
+  cameraManager.starting = true
+
+  try {
+    const { available, videoBinary } = await detectCamera()
+    if (!available) {
+      return { ok: false, message: 'No camera detected.' }
+    }
+
+    const child = spawn(videoBinary, [
+      '-t', '0',
+      '--codec', 'mjpeg',
+      '-o', '-',
+      '--width', '640',
+      '--height', '480',
+      '--framerate', String(CAMERA_TARGET_FPS),
+      '--nopreview',
+    ])
+
+    let startupFailed = false
+    child.once('error', (err) => {
+      startupFailed = true
+      cameraManager.enabled = false
+      cameraManager.child = null
+      cameraStats.streaming = false
+      endAllSubscribers()
+      console.error('Camera process error:', err.message)
+    })
+    child.once('exit', () => {
+      cameraManager.enabled = false
+      cameraManager.child = null
+      cameraStats.streaming = false
+      endAllSubscribers()
+    })
+
+    cameraManager.child = child
+    cameraManager.enabled = true
+    cameraStats.streaming = true
+    cameraStats.startedAt = Date.now()
+    cameraStats.lastFrameAt = null
+    cameraStats.frameTimestamps = []
+
+    let buffer = Buffer.alloc(0)
+    let lastImageSavedAt = 0
+    let imageSaveInFlight = false
+
+    child.stdout.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk])
+
+      for (;;) {
+        const start = buffer.indexOf(JPEG_SOI)
+        if (start === -1) {
+          buffer = Buffer.alloc(0)
+          break
+        }
+        const end = buffer.indexOf(JPEG_EOI, start + JPEG_SOI.length)
+        if (end === -1) {
+          if (start > 0) buffer = buffer.subarray(start)
+          break
+        }
+
+        const frame = buffer.subarray(start, end + JPEG_EOI.length)
+        buffer = buffer.subarray(end + JPEG_EOI.length)
+
+        const now = Date.now()
+        cameraStats.lastFrameAt = now
+        cameraStats.frameTimestamps.push(now)
+        const cutoff = now - 2000
+        while (cameraStats.frameTimestamps.length && cameraStats.frameTimestamps[0] < cutoff) {
+          cameraStats.frameTimestamps.shift()
+        }
+
+        if (!imageSaveInFlight && now - lastImageSavedAt >= IMAGE_SAVE_INTERVAL_MS) {
+          const inFocalRange = lastDistanceOutputCm != null
+            && Math.abs(lastDistanceOutputCm - FOCAL_DISTANCE_CM) < IMAGE_SAVE_DISTANCE_TOLERANCE_CM
+
+          if (inFocalRange) {
+            lastImageSavedAt = now
+            imageSaveInFlight = true
+            const filename = `img-${now}.jpg`
+            fs.writeFile(path.join(IMAGES_DIR, filename), frame)
+              .catch((err) => console.error(`Failed to save ${filename}:`, err.message))
+              .finally(() => { imageSaveInFlight = false })
+          }
+        }
+
+        broadcastFrame(frame)
+      }
+    })
+
+    return startupFailed
+      ? { ok: false, message: 'Camera process failed to start.' }
+      : { ok: true }
+  } finally {
+    cameraManager.starting = false
+  }
+}
+
+function stopCameraStream() {
+  if (cameraManager.child) {
+    cameraManager.child.kill('SIGTERM')
+  }
+  cameraManager.child = null
+  cameraManager.enabled = false
+  cameraStats.streaming = false
+  endAllSubscribers()
+}
+
+app.get('/api/camera/status', async (_req, res) => {
+  const { available } = await detectCamera()
+  res.json({ available, enabled: cameraManager.enabled })
+})
+
+app.post('/api/camera/enable', requireAdmin, async (_req, res) => {
+  const result = await startCameraStream()
+  if (!result.ok) {
+    res.status(503).json({ success: false, message: result.message })
     return
   }
+  res.json({ success: true, enabled: true })
+})
 
-  await waitForCameraRelease()
-  if (res.writableEnded || req.destroyed) return
+app.post('/api/camera/disable', requireAdmin, (_req, res) => {
+  stopCameraStream()
+  res.json({ success: true, enabled: false })
+})
 
-  let released = false
-  let resolveReleased
-  cameraReleased = new Promise((resolve) => { resolveReleased = resolve })
-  const markReleased = () => {
-    if (released) return
-    released = true
-    resolveReleased()
+app.get('/api/camera/stream', (req, res) => {
+  if (!cameraManager.enabled) {
+    res.status(503).json({ message: 'Camera is not enabled.' })
+    return
   }
-
-  const child = spawn(videoBinary, [
-    '-t', '0',
-    '--codec', 'mjpeg',
-    '-o', '-',
-    '--width', '640',
-    '--height', '480',
-    '--framerate', String(CAMERA_TARGET_FPS),
-    '--nopreview',
-  ])
-
-  cameraStats.streaming = true
-  cameraStats.startedAt = Date.now()
-  cameraStats.lastFrameAt = null
-  cameraStats.frameTimestamps = []
-
-  const cleanup = () => {
-    child.kill('SIGTERM')
-    cameraStats.streaming = false
-  }
-  req.on('close', cleanup)
-  res.on('close', cleanup)
-
-  child.on('error', (err) => {
-    cameraStats.streaming = false
-    markReleased()
-    if (!res.headersSent) {
-      res.status(500).json({ message: err.message })
-    } else if (!res.writableEnded) {
-      res.end()
-    }
-  })
-  child.on('exit', () => {
-    cameraStats.streaming = false
-    markReleased()
-    if (!res.writableEnded) res.end()
-  })
 
   res.writeHead(200, {
     'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
@@ -310,55 +458,13 @@ app.get('/api/camera/stream', async (req, res) => {
     Connection: 'close',
   })
 
-  let buffer = Buffer.alloc(0)
-  let lastImageSavedAt = 0
-  let imageSaveInFlight = false
+  cameraManager.subscribers.add(res)
 
-  child.stdout.on('data', (chunk) => {
-    buffer = Buffer.concat([buffer, chunk])
-
-    for (;;) {
-      const start = buffer.indexOf(JPEG_SOI)
-      if (start === -1) {
-        buffer = Buffer.alloc(0)
-        break
-      }
-      const end = buffer.indexOf(JPEG_EOI, start + JPEG_SOI.length)
-      if (end === -1) {
-        if (start > 0) buffer = buffer.subarray(start)
-        break
-      }
-
-      const frame = buffer.subarray(start, end + JPEG_EOI.length)
-      buffer = buffer.subarray(end + JPEG_EOI.length)
-
-      const now = Date.now()
-      cameraStats.lastFrameAt = now
-      cameraStats.frameTimestamps.push(now)
-      const cutoff = now - 2000
-      while (cameraStats.frameTimestamps.length && cameraStats.frameTimestamps[0] < cutoff) {
-        cameraStats.frameTimestamps.shift()
-      }
-
-      if (!imageSaveInFlight && now - lastImageSavedAt >= IMAGE_SAVE_INTERVAL_MS) {
-        const inFocalRange = lastDistanceOutputCm != null
-          && Math.abs(lastDistanceOutputCm - FOCAL_DISTANCE_CM) < IMAGE_SAVE_DISTANCE_TOLERANCE_CM
-
-        if (inFocalRange) {
-          lastImageSavedAt = now
-          imageSaveInFlight = true
-          const filename = `img-${now}.jpg`
-          fs.writeFile(path.join(IMAGES_DIR, filename), frame)
-            .catch((err) => console.error(`Failed to save ${filename}:`, err.message))
-            .finally(() => { imageSaveInFlight = false })
-        }
-      }
-
-      res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.length}\r\n\r\n`)
-      res.write(frame)
-      res.write('\r\n')
-    }
-  })
+  const cleanup = () => {
+    cameraManager.subscribers.delete(res)
+  }
+  req.on('close', cleanup)
+  res.on('close', cleanup)
 })
 
 async function listSavedImages() {

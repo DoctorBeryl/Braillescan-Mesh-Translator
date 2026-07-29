@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Activity, Aperture, Box, Bug, Clock, Cpu, Crosshair, Download, ExternalLink, Focus, Gauge, HardDrive, Home as HomeIcon, Image as ImageIcon, KeyRound, Languages as LanguagesIcon, Loader2, LogIn, LogOut, Lock, Moon, Palette, Settings, ShieldCheck, Sun, Terminal, Type, Video, Wifi, X } from 'lucide-react'
+import { Activity, Aperture, Box, Bug, ChevronLeft, ChevronRight, Clock, Cpu, Crosshair, Download, ExternalLink, Focus, Gauge, HardDrive, Home as HomeIcon, Image as ImageIcon, KeyRound, Languages as LanguagesIcon, Loader2, LogIn, LogOut, Lock, Moon, Palette, Settings, ShieldCheck, Sun, Terminal, Type, Video, Wifi, X } from 'lucide-react'
 import WifiPanel from './components/WifiPanel'
 import CameraStream from './components/CameraStream'
 import { computeSharpness, sampleImageData } from './lib/sharpness'
@@ -104,6 +104,11 @@ function App() {
   const [compileStatus, setCompileStatus] = useState('')
   const [imagesPopup, setImagesPopup] = useState(null)
   const [keepRawDebug, setKeepRawDebug] = useState(false)
+  const [stitchedViewerOpen, setStitchedViewerOpen] = useState(false)
+  const [stitchedImages, setStitchedImages] = useState([])
+  const [stitchedIndex, setStitchedIndex] = useState(0)
+  const [stitchedLoading, setStitchedLoading] = useState(false)
+  const [stitchedError, setStitchedError] = useState('')
   const settingsRef = useRef(null)
   const modelViewerRef = useRef(null)
 
@@ -543,6 +548,42 @@ function App() {
     }
   }
 
+  // Reads whatever compile.py has already written to output/ on the server -
+  // no new compile is triggered, this just views pieces that are already there.
+  const openStitchedViewer = async () => {
+    setStitchedViewerOpen(true)
+    setStitchedLoading(true)
+    setStitchedError('')
+    try {
+      const response = await fetch('/api/output/images')
+      const data = await response.json()
+      if (!response.ok) throw new Error(data.message || 'Failed to load stitched images.')
+      const images = data.images ?? []
+      setStitchedImages(images)
+      setStitchedIndex(0)
+    } catch (err) {
+      setStitchedError(err.message || 'Failed to load stitched images.')
+      setStitchedImages([])
+    } finally {
+      setStitchedLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!stitchedViewerOpen) return undefined
+    const handleKey = (event) => {
+      if (event.key === 'ArrowLeft') {
+        setStitchedIndex((current) => (stitchedImages.length ? (current - 1 + stitchedImages.length) % stitchedImages.length : 0))
+      } else if (event.key === 'ArrowRight') {
+        setStitchedIndex((current) => (stitchedImages.length ? (current + 1) % stitchedImages.length : 0))
+      } else if (event.key === 'Escape') {
+        setStitchedViewerOpen(false)
+      }
+    }
+    window.addEventListener('keydown', handleKey)
+    return () => window.removeEventListener('keydown', handleKey)
+  }, [stitchedViewerOpen, stitchedImages.length])
+
   const handleExport = async () => {
     const viewer = modelViewerRef.current
     if (!viewer || typeof viewer.exportScene !== 'function') {
@@ -821,6 +862,28 @@ function App() {
           </div>
 
           <div className={`space-y-2 rounded-2xl border p-3 bg-[#0c1017] ${themePalette.card}`}>
+            <div className={`flex items-center justify-between rounded-xl border p-2 bg-[#0d1219] ${themePalette.surface}`}>
+              <div>
+                <p className={`text-[10px] uppercase ${themePalette.muted}`}>Surface</p>
+                <p className={`text-sm ${themePalette.text}`}>
+                  {stitchedImages.length > 0 ? `Stitched scan (${stitchedImages.length})` : 'Stitched scan'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={openStitchedViewer}
+                disabled={stitchedLoading}
+                className={`inline-flex cursor-pointer items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60 ${tone.button}`}
+              >
+                {stitchedLoading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={2.25} />
+                ) : (
+                  <ImageIcon className="h-3.5 w-3.5" strokeWidth={2.25} />
+                )}
+                View
+              </button>
+            </div>
+
             <div className={`flex items-center justify-between rounded-xl border p-2 bg-[#0d1219] ${themePalette.surface}`}>
               <div>
                 <p className={`text-[10px] uppercase ${themePalette.muted}`}>Text</p>
@@ -1406,6 +1469,108 @@ function App() {
                 )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {stitchedViewerOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setStitchedViewerOpen(false)}
+        >
+          <div
+            className={`w-full max-w-3xl rounded-2xl border p-4 shadow-2xl ${themePalette.surface}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <p className={`text-sm font-semibold ${themePalette.text}`}>Stitched surface</p>
+                <p className={`text-xs ${themePalette.muted}`}>
+                  {stitchedImages.length > 0
+                    ? `${stitchedIndex + 1} / ${stitchedImages.length} · ${stitchedImages[stitchedIndex].name}`
+                    : 'Pieces written by compile.py to output/'}
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {stitchedImages.length > 0 && (
+                  <a
+                    href={`data:image/jpeg;base64,${stitchedImages[stitchedIndex].data}`}
+                    download={stitchedImages[stitchedIndex].name}
+                    className={`inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-full transition ${themePalette.chip}`}
+                    aria-label="Download image"
+                  >
+                    <Download className="h-3.5 w-3.5" strokeWidth={2.25} />
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setStitchedViewerOpen(false)}
+                  className={`inline-flex h-6 w-6 cursor-pointer items-center justify-center rounded-full transition ${themePalette.chip}`}
+                  aria-label="Close"
+                >
+                  <X className="h-3.5 w-3.5" strokeWidth={2.25} />
+                </button>
+              </div>
+            </div>
+
+            <div className={`relative mt-3 flex min-h-[320px] items-center justify-center overflow-hidden rounded-xl border bg-black ${themePalette.outline}`}>
+              {stitchedLoading ? (
+                <p className={`flex items-center gap-1.5 text-sm ${themePalette.secondary}`}>
+                  <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.25} />
+                  Loading…
+                </p>
+              ) : stitchedError ? (
+                <p className="px-4 text-center text-sm text-red-400">{stitchedError}</p>
+              ) : stitchedImages.length === 0 ? (
+                <p className={`px-4 text-center text-sm ${themePalette.secondary}`}>
+                  No stitched pieces yet — compile a scan first.
+                </p>
+              ) : (
+                <>
+                  <img
+                    src={`data:image/jpeg;base64,${stitchedImages[stitchedIndex].data}`}
+                    alt={stitchedImages[stitchedIndex].name}
+                    className="max-h-[60vh] w-full object-contain"
+                  />
+                  {stitchedImages.length > 1 && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setStitchedIndex((current) => (current - 1 + stitchedImages.length) % stitchedImages.length)
+                        }
+                        aria-label="Previous image"
+                        className="absolute left-2 top-1/2 flex h-9 w-9 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full bg-black/50 text-white transition hover:bg-black/70"
+                      >
+                        <ChevronLeft className="h-5 w-5" strokeWidth={2.25} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setStitchedIndex((current) => (current + 1) % stitchedImages.length)}
+                        aria-label="Next image"
+                        className="absolute right-2 top-1/2 flex h-9 w-9 -translate-y-1/2 cursor-pointer items-center justify-center rounded-full bg-black/50 text-white transition hover:bg-black/70"
+                      >
+                        <ChevronRight className="h-5 w-5" strokeWidth={2.25} />
+                      </button>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+
+            {stitchedImages.length > 1 && (
+              <div className="mt-3 flex flex-wrap justify-center gap-1.5">
+                {stitchedImages.map((image, index) => (
+                  <button
+                    key={image.name}
+                    type="button"
+                    onClick={() => setStitchedIndex(index)}
+                    aria-label={`Go to ${image.name}`}
+                    className={`h-1.5 cursor-pointer rounded-full transition ${index === stitchedIndex ? `w-5 ${tone.dot}` : `w-1.5 ${themePalette.chip}`}`}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

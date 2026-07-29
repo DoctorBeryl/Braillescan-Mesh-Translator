@@ -60,6 +60,35 @@ SHARPNESS_SAMPLE_HEIGHT = 120
 DOT_MIN_RADIUS_FRACTION = 0.035
 DOT_MAX_RADIUS_FRACTION = 0.085
 MAX_DOTS_PER_IMAGE = 150      # bounds RANSAC cost; excess low-confidence circles are dropped
+# A real embossed dot sits right at DOT_MIN_RADIUS_FRACTION's boundary (measured
+# ~17px against a min_r of 17px on a 640x480 capture), so cv2.HoughCircles's
+# accumulator threshold has to be permissive enough to clear that boundary
+# consistently frame-to-frame. The previous value of 22 routinely missed most of
+# a frame's real dots (sometimes all of them) on otherwise-sharp, otherwise-
+# overlapping stills, starving the RANSAC alignment below of correspondences
+# and splitting a single scanned surface into far more output pieces than the
+# real overlap between shots warrants. _filter_to_radius_mode/_filter_to_grid
+# below claw back the precision this costs by rejecting the extra
+# low-confidence circles that a lower threshold lets through, rather than
+# relying on the accumulator threshold alone to separate real dots from noise.
+HOUGH_ACCUMULATOR_THRESHOLD = 12
+# Mirrors src/lib/crescentDetect.js's filterToRadiusMode/filterToGrid: a real
+# dot grid is far more uniform in dot size and spacing than the raw Hough
+# candidate list, so keeping only candidates that agree with the frame's own
+# dominant radius and lattice pitch discards noise-driven circles that a
+# permissive HOUGH_ACCUMULATOR_THRESHOLD lets through, without having to fall
+# back to a stricter (and less sensitive) accumulator threshold to do it.
+RADIUS_MODE_MIN_CANDIDATES = 4
+RADIUS_MODE_BUCKET_FRACTION = 0.25
+RADIUS_MODE_TOLERANCE = 0.35
+GRID_PITCH_MIN_CANDIDATES = 6
+GRID_PITCH_BUCKET_FRACTION = 0.2
+GRID_PITCH_MIN_BUCKET_SUPPORT = 2
+# Includes diagonal lattice distances (sqrt(2), sqrt(5), 2*sqrt(2)) in addition to
+# straight multiples, since a dot's nearest neighbor in a 2D grid is often
+# diagonal rather than axis-aligned.
+GRID_PITCH_MULTIPLES = (1.0, 2 ** 0.5, 2.0, 5 ** 0.5, 2 * 2 ** 0.5, 3.0)
+GRID_PITCH_TOLERANCE = 0.25
 
 # Polarity classification (bump-facing-camera vs. dimple-facing-away). Mirrors
 # the constants in src/lib/crescentDetect.js so the two readings of the same
@@ -95,6 +124,14 @@ MIN_PIVOT_DISTANCE_PX = 10.0     # ignore near-duplicate pivot points; their rot
 # nothing to gain from grinding through the rest of the RANSAC budget.
 EARLY_EXIT_FRACTION = 0.6
 MAX_CANVAS_DIMENSION = 6000   # guards against a bad transform blowing up the merged canvas
+# The camera pans and rotates gently across a flat page between shots; it never
+# flips past perpendicular. A transform that only barely clears MIN_DOT_MATCHES
+# can still land on an implausible rotation (confirmed on real captures: a
+# handful of noise-driven correspondences on a periodic dot grid occasionally
+# line up at ~90-180 degrees), which then merges two unrelated crops into one
+# canvas. Capping the accepted rotation rejects those without having to raise
+# MIN_DOT_MATCHES (which would throw out genuine low-overlap matches too).
+MAX_ALIGNMENT_ROTATION_DEGREES = 45.0
 
 RNG = np.random.default_rng()
 
@@ -250,6 +287,84 @@ def classify_dot_polarity(gray, enhanced, points, radii):
     return polarity
 
 
+def _filter_to_radius_mode(points, radii, weights):
+    """Keep only candidates whose radius agrees with the frame's own dominant
+    (vote-weighted) radius. Mirrors src/lib/crescentDetect.js's
+    filterToRadiusMode - a real dot grid is one physical size, so a candidate
+    far from that mode is almost always a noise-driven Hough hit rather than a
+    dot HOUGH_ACCUMULATOR_THRESHOLD was too permissive about."""
+    if len(points) < RADIUS_MODE_MIN_CANDIDATES:
+        return points, radii, weights
+
+    median = float(np.median(radii))
+    bucket = max(1.0, median * RADIUS_MODE_BUCKET_FRACTION)
+    keys = np.round(radii / bucket).astype(int)
+    bucket_weight = defaultdict(float)
+    for key, w in zip(keys.tolist(), weights.tolist()):
+        bucket_weight[key] += w
+    best_key = max(bucket_weight, key=bucket_weight.get)
+    mode_radius = best_key * bucket
+
+    mask = np.abs(radii - mode_radius) <= mode_radius * RADIUS_MODE_TOLERANCE
+    if not mask.any():
+        return points, radii, weights
+    return points[mask], radii[mask], weights[mask]
+
+
+def _estimate_grid_pitch(nn_distances):
+    """The base dot pitch is the *smallest* recurring spacing, not the most
+    common one - see the matching comment on estimateGridPitch in
+    src/lib/crescentDetect.js, which this mirrors."""
+    finite = np.sort(nn_distances[np.isfinite(nn_distances)])
+    if len(finite) == 0:
+        return None
+
+    median = float(finite[len(finite) // 2])
+    bucket = max(1.5, median * GRID_PITCH_BUCKET_FRACTION)
+    keys = np.round(finite / bucket).astype(int)
+
+    counts = defaultdict(int)
+    for key in keys.tolist():
+        counts[key] += 1
+
+    smallest_supported = None
+    best_key, best_count = None, 0
+    for key, count in counts.items():
+        if count > best_count:
+            best_key, best_count = key, count
+        if count >= GRID_PITCH_MIN_BUCKET_SUPPORT and (smallest_supported is None or key < smallest_supported):
+            smallest_supported = key
+
+    chosen = best_key if smallest_supported is None else smallest_supported
+    return None if chosen is None else chosen * bucket
+
+
+def _filter_to_grid(points, radii, weights):
+    """Keep only candidates whose nearest neighbor sits at the frame's own
+    lattice pitch (or a diagonal/straight multiple of it). Mirrors
+    src/lib/crescentDetect.js's filterToGrid, discarding isolated
+    noise-driven circles that don't belong to the dot grid at all."""
+    if len(points) < GRID_PITCH_MIN_CANDIDATES:
+        return points, radii, weights
+
+    dists = np.sqrt(((points[:, None, :] - points[None, :, :]) ** 2).sum(axis=2))
+    np.fill_diagonal(dists, np.inf)
+    nn = dists.min(axis=1)
+
+    pitch = _estimate_grid_pitch(nn)
+    if not pitch:
+        return points, radii, weights
+
+    mask = np.zeros(len(points), dtype=bool)
+    for multiple in GRID_PITCH_MULTIPLES:
+        target = pitch * multiple
+        mask |= np.abs(nn - target) <= target * GRID_PITCH_TOLERANCE
+
+    if not mask.any():
+        return points, radii, weights
+    return points[mask], radii[mask], weights[mask]
+
+
 def detect_dots(gray):
     """Return (points, polarity): an (N, 2) array of braille dot centers
     (x, y) in `gray`, and a matching (N,) bool array of each dot's polarity
@@ -262,13 +377,20 @@ def detect_dots(gray):
     blurred = cv2.GaussianBlur(enhanced, (5, 5), 1.2)
     circles = cv2.HoughCircles(
         blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=max_r * 1.1,
-        param1=80, param2=22, minRadius=min_r, maxRadius=max_r,
+        param1=80, param2=HOUGH_ACCUMULATOR_THRESHOLD, minRadius=min_r, maxRadius=max_r,
     )
     if circles is None:
         return np.empty((0, 2), dtype=np.float64), np.empty((0,), dtype=bool)
 
     points = circles[0][:, :2].astype(np.float64)[:MAX_DOTS_PER_IMAGE]
     radii = circles[0][:, 2].astype(np.float64)[:MAX_DOTS_PER_IMAGE]
+    # cv2.HoughCircles doesn't expose each candidate's raw vote count, only the
+    # rank it produces them in (strongest first) - used here as a stand-in
+    # weight so the radius-mode vote below still favors more confident circles.
+    weights = np.arange(len(points), 0, -1, dtype=np.float64)
+    points, radii, weights = _filter_to_radius_mode(points, radii, weights)
+    points, radii, _ = _filter_to_grid(points, radii, weights)
+
     polarity = classify_dot_polarity(gray, enhanced, points, radii)
     return points, polarity
 
@@ -291,6 +413,10 @@ def _similarity_from_pair(p1, p2, q1, q2):
 
 def _apply_transform(m, points):
     return (m[:, :2] @ points.T).T + m[:, 2]
+
+
+def _rotation_degrees(m):
+    return float(np.degrees(np.arctan2(m[1, 0], m[0, 0])))
 
 
 def _count_inliers(m, pts_new, pts_base, pol_new, pol_base):
@@ -392,6 +518,9 @@ def estimate_dot_alignment(pts_new, pol_new, pts_base, pol_base):
         if refined is not None:
             best_m = refined
             best_inliers = int(_count_inliers(best_m, pts_new, pts_base, pol_new, pol_base)[0].sum())
+
+    if abs(_rotation_degrees(best_m)) > MAX_ALIGNMENT_ROTATION_DEGREES:
+        return None, best_inliers
 
     return best_m, best_inliers
 
